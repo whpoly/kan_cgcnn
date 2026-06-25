@@ -1,4 +1,11 @@
 torch>=2.4
 torch-geometric>=2.5
 numpy>=1.26
+pandas>=2.2,<3
+scipy
+scikit-learn
+pymatgen
+matminer
+monty
+pymongo
 pytest>=8.0

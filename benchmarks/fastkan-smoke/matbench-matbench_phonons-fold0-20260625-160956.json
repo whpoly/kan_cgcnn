@@ -1,0 +1,90 @@
+{
+  "args": {
+    "dataset": "matbench_phonons",
+    "fold": 0,
+    "conv_nets": [
+      "mlp",
+      "kan"
+    ],
+    "train_size": null,
+    "test_size": null,
+    "val_ratio": 0.0,
+    "epochs": 10,
+    "batch_size": 64,
+    "hidden_dim": 64,
+    "head_hidden_dims": [
+      32
+    ],
+    "num_convs": 4,
+    "conv_kan_impl": "fastkan",
+    "conv_kan_hidden_dim": 16,
+    "conv_kan_grid_size": 8,
+    "conv_kan_spline_order": 3,
+    "cutoff": 6.0,
+    "edge_dim": 41,
+    "max_atomic_number": 92,
+    "dropout": 0.0,
+    "lr": 0.003,
+    "weight_decay": 1e-05,
+    "seed": 7,
+    "device": "cuda",
+    "require_cuda": true,
+    "num_workers": 0,
+    "pin_memory": false,
+    "persistent_workers": false,
+    "log_every_steps": 999,
+    "epoch_pause_seconds": 0.0,
+    "forward_iters": 10,
+    "warmup_iters": 2,
+    "output_dir": "benchmarks\\fastkan-smoke"
+  },
+  "matbench": {
+    "dataset": "matbench_phonons",
+    "fold": 0,
+    "target": "last phdos peak",
+    "n_samples": 1265,
+    "train_size": 1012,
+    "val_size": 0,
+    "test_size": 253,
+    "conversion_seconds": 3.047664700000041
+  },
+  "graph_config": {
+    "cutoff": 6.0,
+    "edge_dim": 41,
+    "max_atomic_number": 92,
+    "gaussian_width": null
+  },
+  "target_scaler": {
+    "mean": 571.8687133789062,
+    "std": 481.0203552246094
+  },
+  "runtime": {
+    "torch_version": "2.11.0+cu128",
+    "cuda_available": true,
+    "device": "cuda",
+    "cuda_device_name": "NVIDIA GeForce RTX 5060 Ti",
+    "cuda_device_count": 1
+  },
+  "results": [
+    {
+      "conv_net": "mlp",
+      "kan_impl": "none",
+      "params": 96641,
+      "best_val_mae": NaN,
+      "test_mae": 132.59219360351562,
+      "test_rmse": 242.74530029296875,
+      "train_seconds": 2.296197900000152,
+      "forward_ms_per_batch": 1.8608100000164995
+    },
+    {
+      "conv_net": "kan",
+      "kan_impl": "fastkan",
+      "params": 182729,
+      "best_val_mae": NaN,
+      "test_mae": 156.70101928710938,
+      "test_rmse": 285.4741516113281,
+      "train_seconds": 9.003718100000015,
+      "forward_ms_per_batch": 18.12345999999252
+    }
+  ]
+}

@@ -7,7 +7,7 @@ from torch import nn
 from torch.nn import functional as F
 from torch_geometric.nn import MessagePassing, global_mean_pool
 
-from .kan import KANMLP
+from .kan import make_kan_mlp
 
 
 class CrystalGraphConv(MessagePassing):
@@ -18,9 +18,9 @@ class CrystalGraphConv(MessagePassing):
         node_dim: int,
         edge_dim: int,
         conv_net: Literal["mlp", "kan"] = "mlp",
-        conv_mlp_hidden_dim: int | None = None,
+        conv_kan_impl: Literal["spline", "fastkan"] = "fastkan",
         conv_kan_hidden_dim: int = 16,
-        conv_kan_grid_size: int = 3,
+        conv_kan_grid_size: int = 8,
         conv_kan_spline_order: int = 3,
         dropout: float = 0.0,
     ) -> None:
@@ -28,18 +28,13 @@ class CrystalGraphConv(MessagePassing):
         pair_dim = 2 * node_dim + edge_dim
         output_dim = 2 * node_dim
         if conv_net == "mlp":
-            mlp_hidden_dim = conv_mlp_hidden_dim or output_dim
-            self.interaction_net = nn.Sequential(
-                nn.Linear(pair_dim, mlp_hidden_dim),
-                nn.Softplus(),
-                nn.Dropout(dropout) if dropout > 0 else nn.Identity(),
-                nn.Linear(mlp_hidden_dim, output_dim),
-            )
+            self.fc_full = nn.Linear(pair_dim, output_dim)
         elif conv_net == "kan":
-            self.interaction_net = KANMLP(
+            self.fc_full = make_kan_mlp(
                 pair_dim,
                 conv_kan_hidden_dim,
                 output_dim,
+                impl=conv_kan_impl,
                 dropout=dropout,
                 grid_size=conv_kan_grid_size,
                 spline_order=conv_kan_spline_order,
@@ -47,8 +42,8 @@ class CrystalGraphConv(MessagePassing):
         else:
             raise ValueError(f"unsupported conv_net {conv_net!r}; expected 'mlp' or 'kan'")
 
-        self.bn_message = nn.BatchNorm1d(node_dim)
-        self.bn_update = nn.BatchNorm1d(node_dim)
+        self.bn1 = nn.BatchNorm1d(output_dim)
+        self.bn2 = nn.BatchNorm1d(node_dim)
 
     def forward(
         self,
@@ -57,8 +52,8 @@ class CrystalGraphConv(MessagePassing):
         edge_attr: torch.Tensor,
     ) -> torch.Tensor:
         message = self.propagate(edge_index, x=x, edge_attr=edge_attr)
-        message = self.bn_message(message)
-        return F.softplus(self.bn_update(x + message))
+        message = self.bn2(message)
+        return F.softplus(x + message)
 
     def message(
         self,
@@ -67,7 +62,7 @@ class CrystalGraphConv(MessagePassing):
         edge_attr: torch.Tensor,
     ) -> torch.Tensor:
         z = torch.cat([x_i, x_j, edge_attr], dim=-1)
-        gate, core = self.interaction_net(z).chunk(2, dim=-1)
+        gate, core = self.bn1(self.fc_full(z)).chunk(2, dim=-1)
         return torch.sigmoid(gate) * F.softplus(core)
 
 
@@ -102,13 +97,13 @@ class CGCNN(nn.Module):
         node_input_dim: int,
         edge_input_dim: int,
         hidden_dim: int = 64,
-        num_convs: int = 3,
-        head_hidden_dims: Sequence[int] = (128, 64),
+        num_convs: int = 4,
+        head_hidden_dims: Sequence[int] = (32,),
         out_dim: int = 1,
         conv_net: Literal["mlp", "kan"] = "mlp",
-        conv_mlp_hidden_dim: int | None = None,
+        conv_kan_impl: Literal["spline", "fastkan"] = "fastkan",
         conv_kan_hidden_dim: int = 16,
-        conv_kan_grid_size: int = 3,
+        conv_kan_grid_size: int = 8,
         conv_kan_spline_order: int = 3,
         dropout: float = 0.0,
     ) -> None:
@@ -116,13 +111,13 @@ class CGCNN(nn.Module):
         if num_convs < 1:
             raise ValueError("num_convs must be at least 1")
 
-        self.node_embedding = nn.Linear(node_input_dim, hidden_dim)
+        self.embedding = nn.Linear(node_input_dim, hidden_dim)
         self.convs = nn.ModuleList(
             CrystalGraphConv(
                 hidden_dim,
                 edge_input_dim,
                 conv_net=conv_net,
-                conv_mlp_hidden_dim=conv_mlp_hidden_dim,
+                conv_kan_impl=conv_kan_impl,
                 conv_kan_hidden_dim=conv_kan_hidden_dim,
                 conv_kan_grid_size=conv_kan_grid_size,
                 conv_kan_spline_order=conv_kan_spline_order,
@@ -130,11 +125,25 @@ class CGCNN(nn.Module):
             )
             for _ in range(num_convs)
         )
-        self.head = MLPHead(hidden_dim, head_hidden_dims, out_dim, dropout)
+        if len(head_hidden_dims) < 1:
+            raise ValueError("head_hidden_dims must contain at least h_fea_len")
+        self.conv_to_fc = nn.Linear(hidden_dim, head_hidden_dims[0])
+        self.conv_to_fc_softplus = nn.Softplus()
+        self.fcs = nn.ModuleList(
+            nn.Linear(src, dst) for src, dst in zip(head_hidden_dims[:-1], head_hidden_dims[1:])
+        )
+        self.softpluses = nn.ModuleList(nn.Softplus() for _ in self.fcs)
+        self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+        self.fc_out = nn.Linear(head_hidden_dims[-1], out_dim)
 
     def forward(self, data) -> torch.Tensor:
-        x = F.softplus(self.node_embedding(data.x))
+        x = self.embedding(data.x)
         for conv in self.convs:
             x = conv(x, data.edge_index, data.edge_attr)
         pooled = global_mean_pool(x, data.batch)
-        return self.head(pooled).squeeze(-1)
+        out = self.conv_to_fc_softplus(self.conv_to_fc(pooled))
+        out = self.dropout(out)
+        for fc, softplus in zip(self.fcs, self.softpluses):
+            out = softplus(fc(out))
+            out = self.dropout(out)
+        return self.fc_out(out).squeeze(-1)

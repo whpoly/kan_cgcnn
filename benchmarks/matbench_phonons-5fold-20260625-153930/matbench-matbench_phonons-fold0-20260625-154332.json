@@ -1,0 +1,87 @@
+{
+  "args": {
+    "dataset": "matbench_phonons",
+    "fold": 0,
+    "conv_nets": [
+      "mlp",
+      "kan"
+    ],
+    "train_size": null,
+    "test_size": null,
+    "val_ratio": 0.1,
+    "epochs": 100,
+    "batch_size": 64,
+    "hidden_dim": 64,
+    "head_hidden_dims": [
+      128,
+      64
+    ],
+    "num_convs": 3,
+    "conv_mlp_hidden_dim": null,
+    "conv_kan_hidden_dim": 16,
+    "conv_kan_grid_size": 3,
+    "conv_kan_spline_order": 3,
+    "cutoff": 6.0,
+    "edge_dim": 32,
+    "max_atomic_number": 118,
+    "dropout": 0.0,
+    "lr": 0.003,
+    "weight_decay": 1e-05,
+    "seed": 7,
+    "device": "cuda",
+    "require_cuda": true,
+    "num_workers": 0,
+    "pin_memory": true,
+    "persistent_workers": false,
+    "forward_iters": 40,
+    "warmup_iters": 5,
+    "output_dir": "benchmarks/matbench_phonons-5fold-20260625-153930"
+  },
+  "matbench": {
+    "dataset": "matbench_phonons",
+    "fold": 0,
+    "target": "last phdos peak",
+    "n_samples": 1265,
+    "train_size": 911,
+    "val_size": 101,
+    "test_size": 253,
+    "conversion_seconds": 3.9286441000003833
+  },
+  "graph_config": {
+    "cutoff": 6.0,
+    "edge_dim": 32,
+    "max_atomic_number": 118,
+    "gaussian_width": null
+  },
+  "target_scaler": {
+    "mean": 566.7465209960938,
+    "std": 477.26739501953125
+  },
+  "runtime": {
+    "torch_version": "2.11.0+cu128",
+    "cuda_available": true,
+    "device": "cuda",
+    "cuda_device_name": "NVIDIA GeForce RTX 5060 Ti",
+    "cuda_device_count": 1
+  },
+  "results": [
+    {
+      "conv_net": "mlp",
+      "params": 136449,
+      "best_val_mae": 81.29119873046875,
+      "test_mae": 85.40799713134766,
+      "test_rmse": 144.5006103515625,
+      "train_seconds": 26.317649699980393,
+      "forward_ms_per_batch": 3.6702924997371156
+    },
+    {
+      "conv_net": "kan",
+      "params": 135777,
+      "best_val_mae": 84.63410949707031,
+      "test_mae": 91.51262664794922,
+      "test_rmse": 155.0111846923828,
+      "train_seconds": 199.95862719998695,
+      "forward_ms_per_batch": 44.44949499957147
+    }
+  ]
+}

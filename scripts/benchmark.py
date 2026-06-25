@@ -32,14 +32,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hidden-dim", type=int, default=64)
     parser.add_argument("--head-hidden-dims", type=int, nargs="+", default=[128, 64])
     parser.add_argument("--num-convs", type=int, default=3)
-    parser.add_argument("--conv-mlp-hidden-dim", type=int, default=None)
+    parser.add_argument("--conv-kan-impl", choices=["spline", "fastkan"], default="fastkan")
     parser.add_argument("--conv-kan-hidden-dim", type=int, default=16)
     parser.add_argument("--dropout", type=float, default=0.0)
     parser.add_argument("--lr", type=float, default=3e-3)
     parser.add_argument("--weight-decay", type=float, default=1e-5)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--conv-kan-grid-size", type=int, default=3)
+    parser.add_argument("--conv-kan-grid-size", type=int, default=8)
     parser.add_argument("--conv-kan-spline-order", type=int, default=3)
     parser.add_argument("--forward-iters", type=int, default=80)
     parser.add_argument("--warmup-iters", type=int, default=10)
@@ -155,7 +155,7 @@ def run_conv_net(
         num_convs=args.num_convs,
         head_hidden_dims=args.head_hidden_dims,
         conv_net=conv_net,
-        conv_mlp_hidden_dim=args.conv_mlp_hidden_dim,
+        conv_kan_impl=args.conv_kan_impl,
         conv_kan_hidden_dim=args.conv_kan_hidden_dim,
         conv_kan_grid_size=args.conv_kan_grid_size,
         conv_kan_spline_order=args.conv_kan_spline_order,
@@ -194,6 +194,7 @@ def run_conv_net(
 
     return {
         "conv_net": conv_net,
+        "kan_impl": args.conv_kan_impl if conv_net == "kan" else "none",
         "params": count_parameters(model),
         "best_val_mae": best_val,
         "test_mae": test_metrics["mae"],
@@ -207,6 +208,7 @@ def print_table(rows: Iterable[dict[str, float | int | str]]) -> None:
     rows = list(rows)
     headers = [
         "conv_net",
+        "kan_impl",
         "params",
         "best_val_mae",
         "test_mae",
