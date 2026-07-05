@@ -48,27 +48,40 @@ python scripts\benchmark_modnet_kan.py `
   --output-dir benchmarks\modnet-kan-formulas
 ```
 
-For the stricter benchmark against official MODNet descriptors, create the
-separate official MODNet environment and run the combined wrapper:
+For the stricter benchmark against official MODNet descriptors, the easiest
+remote setup is a single MODNet-compatible environment that also installs
+PyTorch/KAN:
 
 Linux/CUDA server:
 
 ```bash
-sbatch scripts/slurm_modnet_kan_all.sh
+git clone https://github.com/<your-user>/<your-repo>.git
+cd <your-repo>
+mkdir -p job_logs
+sbatch scripts/slurm_modnet_kan_unified.sh
 ```
 
 The SLURM script runs the full MODNet v0.1.12 Matbench benchmark: 13 original
 Matbench tasks represented as 12 benchmark entries, because
 `matbench_log_gvrh` and `matbench_log_kvrh` are trained together as the
-two-output `matbench_elastic` model. It creates missing conda environments,
-exports official MODNet-selected descriptors, trains `mlp`, `fastkan`, and
-`spline` on those descriptors, prunes KAN parameters, and writes readable
-explicit formula files with held-out metrics.
+two-output `matbench_elastic` model. It creates the missing `modnet-kan` conda
+environment, exports official MODNet-selected descriptors, trains `mlp`,
+`fastkan`, and `spline` on those descriptors, prunes KAN parameters, and writes
+readable explicit formula files with held-out metrics.
+
+If your CUDA driver cannot use the default PyTorch CUDA 12.1 wheel, override
+the torch wheel before submitting:
+
+```bash
+TORCH_SPEC='torch==2.4.1+cu118' \
+TORCH_INDEX_URL='https://download.pytorch.org/whl/cu118' \
+sbatch scripts/slurm_modnet_kan_unified.sh
+```
 
 For a quicker debug run that skips the three large MP tasks:
 
 ```bash
-TASK_SET=small sbatch scripts/slurm_modnet_kan_all.sh
+TASK_SET=small sbatch scripts/slurm_modnet_kan_unified.sh
 ```
 
 The default reliable tuning protocol is:
@@ -218,13 +231,18 @@ blocks swapped for the in-repo KAN layers:
 - features/preprocessing: `cgcnn_pyg_kan.modnet_features`
 - Matbench runner: `scripts/benchmark_modnet_kan.py`
 
-To reproduce the official Matbench MODNet baseline, use the separate
-`modnet==0.1.12` environment. The official package depends on an older
-TensorFlow / pymatgen / scikit-learn stack, so do not install it into the
-PyTorch CUDA environment:
+To reproduce the official Matbench MODNet baseline, use a MODNet-compatible
+Python 3.8 environment. The recommended remote path is the unified
+`modnet-kan` environment, which keeps the old MODNet stack and adds only the
+PyTorch pieces needed by KAN:
 
-One-command run for official MODNet plus KAN/MLP on the exported official
-descriptors:
+```bash
+bash scripts/setup_conda_modnet_kan.sh modnet-kan
+sbatch scripts/slurm_modnet_kan_unified.sh
+```
+
+The older two-environment wrapper is still available if you want to isolate
+TensorFlow/MODNet from PyTorch:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\run_modnet_kan_matbench.ps1
@@ -232,10 +250,9 @@ powershell -ExecutionPolicy Bypass -File scripts\run_modnet_kan_matbench.ps1
 
 The default task set is the full MODNet Matbench benchmark, with the
 `matbench_elastic` special case: `matbench_log_gvrh` and `matbench_log_kvrh`
-are trained as one two-output model. It first runs official MODNet in
-`modnet-v012-matbench`, then runs `mlp`, `fastkan`, and `spline` in
-`kan-cgcnn-cuda` on the exported fold descriptors. Use `--task-set small` only
-for a faster debug run.
+are trained as one two-output model. In unified mode, official MODNet and
+`mlp`/`fastkan`/`spline` all run inside `modnet-kan`. Use `--task-set small` or
+`TASK_SET=small` only for a faster debug run.
 
 ```powershell
 conda env create -f environment-modnet-v012.yml
