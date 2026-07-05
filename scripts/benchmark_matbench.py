@@ -22,6 +22,9 @@ if str(ROOT) not in sys.path:
 from cgcnn_pyg_kan.materials import StructureGraphConfig, structures_to_graphs
 from cgcnn_pyg_kan.model import CGCNN
 
+ATOM_FEATURE_CHOICES = ["onehot", "atomic_number", "elemental", "cgcnn"]
+EDGE_FEATURE_CHOICES = ["gaussian", "distance"]
+
 
 class TargetScaler:
     def __init__(self, values: torch.Tensor) -> None:
@@ -48,21 +51,55 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train-size", type=int, default=None)
     parser.add_argument("--test-size", type=int, default=None)
     parser.add_argument("--val-ratio", type=float, default=0.0)
-    parser.add_argument("--epochs", type=int, default=100)
+    parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--hidden-dim", type=int, default=64)
     parser.add_argument("--head-hidden-dims", type=int, nargs="+", default=[32])
+    parser.add_argument("--kan-head-hidden-dims", type=int, nargs="+", default=[8])
+    parser.add_argument("--mlp-head-net", choices=["mlp", "kan"], default="mlp")
+    parser.add_argument("--kan-head-net", choices=["mlp", "kan"], default="kan")
     parser.add_argument("--num-convs", type=int, default=4)
     parser.add_argument("--conv-kan-impl", choices=["spline", "fastkan"], default="fastkan")
     parser.add_argument("--conv-kan-hidden-dim", type=int, default=16)
-    parser.add_argument("--conv-kan-grid-size", type=int, default=8)
+    parser.add_argument("--conv-kan-grid-size", type=int, default=3)
     parser.add_argument("--conv-kan-spline-order", type=int, default=3)
+    parser.add_argument("--head-kan-impl", choices=["spline", "fastkan"], default=None)
+    parser.add_argument("--head-kan-grid-size", type=int, default=None)
+    parser.add_argument("--head-kan-spline-order", type=int, default=None)
     parser.add_argument("--cutoff", type=float, default=6.0)
     parser.add_argument("--edge-dim", type=int, default=41)
     parser.add_argument("--max-atomic-number", type=int, default=92)
+    parser.add_argument(
+        "--atom-features",
+        choices=ATOM_FEATURE_CHOICES,
+        default=None,
+        help="Backward-compatible alias for --kan-atom-features.",
+    )
+    parser.add_argument(
+        "--edge-features",
+        choices=EDGE_FEATURE_CHOICES,
+        default=None,
+        help="Backward-compatible alias for --kan-edge-features.",
+    )
+    parser.add_argument(
+        "--mlp-atom-features",
+        choices=ATOM_FEATURE_CHOICES,
+        default="cgcnn",
+    )
+    parser.add_argument("--mlp-edge-features", choices=EDGE_FEATURE_CHOICES, default="gaussian")
+    parser.add_argument(
+        "--kan-atom-features",
+        choices=ATOM_FEATURE_CHOICES,
+        default="cgcnn",
+    )
+    parser.add_argument("--kan-edge-features", choices=EDGE_FEATURE_CHOICES, default="gaussian")
     parser.add_argument("--dropout", type=float, default=0.0)
     parser.add_argument("--lr", type=float, default=3e-3)
     parser.add_argument("--weight-decay", type=float, default=1e-5)
+    parser.add_argument("--mlp-lr", type=float, default=None)
+    parser.add_argument("--kan-lr", type=float, default=3e-3)
+    parser.add_argument("--mlp-weight-decay", type=float, default=None)
+    parser.add_argument("--kan-weight-decay", type=float, default=0.0)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--require-cuda", action="store_true")
@@ -118,6 +155,49 @@ def count_parameters(model: torch.nn.Module) -> int:
     return sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
 
 
+def optimizer_hparams(conv_net: str, args: argparse.Namespace) -> tuple[float, float]:
+    lr_override = args.kan_lr if conv_net == "kan" else args.mlp_lr
+    wd_override = args.kan_weight_decay if conv_net == "kan" else args.mlp_weight_decay
+    lr = args.lr if lr_override is None else lr_override
+    weight_decay = args.weight_decay if wd_override is None else wd_override
+    return lr, weight_decay
+
+
+def head_hparams(conv_net: str, args: argparse.Namespace) -> tuple[str, list[int]]:
+    if conv_net == "kan":
+        return args.kan_head_net, list(args.kan_head_hidden_dims)
+    return args.mlp_head_net, list(args.head_hidden_dims)
+
+
+def adamw_parameter_groups(
+    model: torch.nn.Module,
+    weight_decay: float,
+) -> list[dict[str, object]]:
+    decay_params = []
+    no_decay_params = []
+    for name, parameter in model.named_parameters():
+        if not parameter.requires_grad:
+            continue
+        lower_name = name.lower()
+        if (
+            weight_decay == 0.0
+            or parameter.ndim < 2
+            or lower_name.endswith(".bias")
+            or "bn" in lower_name
+            or "norm" in lower_name
+        ):
+            no_decay_params.append(parameter)
+        else:
+            decay_params.append(parameter)
+
+    groups: list[dict[str, object]] = []
+    if decay_params:
+        groups.append({"params": decay_params, "weight_decay": weight_decay})
+    if no_decay_params:
+        groups.append({"params": no_decay_params, "weight_decay": 0.0})
+    return groups
+
+
 def select_subset(items, targets, size: int | None, seed: int):
     if size is None or size >= len(items):
         return list(items), list(targets)
@@ -140,7 +220,51 @@ def split_train_val(graphs: list, val_ratio: float, seed: int) -> tuple[list, li
     return train_graphs, val_graphs
 
 
-def load_matbench_graphs(args: argparse.Namespace):
+def apply_feature_aliases(args: argparse.Namespace) -> None:
+    if args.atom_features is not None:
+        args.kan_atom_features = args.atom_features
+    if args.edge_features is not None:
+        args.kan_edge_features = args.edge_features
+
+
+def graph_config_for_conv_net(conv_net: str, args: argparse.Namespace) -> StructureGraphConfig:
+    if conv_net == "mlp":
+        atom_features = args.mlp_atom_features
+        edge_features = args.mlp_edge_features
+    elif conv_net == "kan":
+        atom_features = args.kan_atom_features
+        edge_features = args.kan_edge_features
+    else:
+        raise ValueError(f"unsupported conv_net {conv_net!r}")
+
+    return StructureGraphConfig(
+        cutoff=args.cutoff,
+        edge_dim=args.edge_dim,
+        max_atomic_number=args.max_atomic_number,
+        atom_features=atom_features,
+        edge_features=edge_features,
+    )
+
+
+def graph_config_payload(
+    graph_config: StructureGraphConfig,
+    conversion_seconds: float,
+    train_size: int,
+    val_size: int,
+    test_size: int,
+) -> dict[str, float | int | str | None]:
+    return {
+        **asdict(graph_config),
+        "node_dim": graph_config.node_dim,
+        "edge_input_dim": graph_config.edge_input_dim,
+        "conversion_seconds": conversion_seconds,
+        "train_size": train_size,
+        "val_size": val_size,
+        "test_size": test_size,
+    }
+
+
+def load_matbench_split(args: argparse.Namespace):
     from matbench.metadata import mbv01_metadata
     from matbench.task import MatbenchTask
 
@@ -167,29 +291,45 @@ def load_matbench_graphs(args: argparse.Namespace):
         args.seed + 1,
     )
 
-    graph_config = StructureGraphConfig(
-        cutoff=args.cutoff,
-        edge_dim=args.edge_dim,
-        max_atomic_number=args.max_atomic_number,
-    )
-    start = time.perf_counter()
-    train_graphs_all = structures_to_graphs(train_structures, train_targets, graph_config)
-    test_graphs = structures_to_graphs(test_structures, test_targets, graph_config)
-    conversion_seconds = time.perf_counter() - start
-    train_graphs, val_graphs = split_train_val(train_graphs_all, args.val_ratio, args.seed)
-
     return {
         "metadata": {
             "dataset": args.dataset,
             "fold": args.fold,
             "target": metadata.target,
             "n_samples": metadata.n_samples,
-            "train_size": len(train_graphs),
-            "val_size": len(val_graphs),
-            "test_size": len(test_graphs),
-            "conversion_seconds": conversion_seconds,
+            "train_and_val_size": len(train_structures),
+            "test_size": len(test_structures),
         },
+        "train_structures": train_structures,
+        "train_targets": train_targets,
+        "test_structures": test_structures,
+        "test_targets": test_targets,
+    }
+
+
+def build_graphs_for_conv_net(
+    args: argparse.Namespace,
+    split_data: dict,
+    conv_net: str,
+) -> dict:
+    graph_config = graph_config_for_conv_net(conv_net, args)
+    start = time.perf_counter()
+    train_graphs_all = structures_to_graphs(
+        split_data["train_structures"],
+        split_data["train_targets"],
+        graph_config,
+    )
+    test_graphs = structures_to_graphs(
+        split_data["test_structures"],
+        split_data["test_targets"],
+        graph_config,
+    )
+    conversion_seconds = time.perf_counter() - start
+    train_graphs, val_graphs = split_train_val(train_graphs_all, args.val_ratio, args.seed)
+
+    return {
         "graph_config": graph_config,
+        "conversion_seconds": conversion_seconds,
         "train_graphs": train_graphs,
         "val_graphs": val_graphs,
         "test_graphs": test_graphs,
@@ -284,24 +424,29 @@ def run_conv_net(
     device = torch.device(args.device)
     train_loader, val_loader, test_loader = loaders
     set_seed(args.seed)
+    head_net, head_hidden_dims = head_hparams(conv_net, args)
     model = CGCNN(
         node_input_dim=graph_config.node_dim,
-        edge_input_dim=graph_config.edge_dim,
+        edge_input_dim=graph_config.edge_input_dim,
         hidden_dim=args.hidden_dim,
         num_convs=args.num_convs,
-        head_hidden_dims=args.head_hidden_dims,
+        head_hidden_dims=head_hidden_dims,
         conv_net=conv_net,
+        head_net=head_net,
         conv_kan_impl=args.conv_kan_impl,
         conv_kan_hidden_dim=args.conv_kan_hidden_dim,
         conv_kan_grid_size=args.conv_kan_grid_size,
         conv_kan_spline_order=args.conv_kan_spline_order,
+        head_kan_impl=args.head_kan_impl,
+        head_kan_grid_size=args.head_kan_grid_size,
+        head_kan_spline_order=args.head_kan_spline_order,
         dropout=args.dropout,
     ).to(device)
 
+    lr, weight_decay = optimizer_hparams(conv_net, args)
     optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=args.lr,
-        weight_decay=args.weight_decay,
+        adamw_parameter_groups(model, weight_decay),
+        lr=lr,
     )
     best_state = None
     best_val = float("nan")
@@ -362,7 +507,19 @@ def run_conv_net(
     return {
         "conv_net": conv_net,
         "kan_impl": args.conv_kan_impl if conv_net == "kan" else "none",
+        "head_net": head_net,
+        "head_hidden_dims": " ".join(str(dim) for dim in head_hidden_dims),
+        "head_kan_impl": (args.head_kan_impl or args.conv_kan_impl) if head_net == "kan" else "none",
+        "head_kan_grid_size": (
+            args.head_kan_grid_size or args.conv_kan_grid_size
+        ) if head_net == "kan" else "none",
+        "atom_features": graph_config.atom_features,
+        "edge_features": graph_config.edge_features,
+        "node_input_dim": graph_config.node_dim,
+        "edge_input_dim": graph_config.edge_input_dim,
         "params": count_parameters(model),
+        "lr": lr,
+        "weight_decay": weight_decay,
         "best_val_mae": best_val,
         "test_mae": test_metrics["mae"],
         "test_rmse": test_metrics["rmse"],
@@ -376,7 +533,17 @@ def print_table(rows: Iterable[dict[str, float | int | str]]) -> None:
     headers = [
         "conv_net",
         "kan_impl",
+        "head_net",
+        "head_hidden_dims",
+        "head_kan_impl",
+        "head_kan_grid_size",
+        "atom_features",
+        "edge_features",
+        "node_input_dim",
+        "edge_input_dim",
         "params",
+        "lr",
+        "weight_decay",
         "best_val_mae",
         "test_mae",
         "test_rmse",
@@ -401,36 +568,52 @@ def _format(value: float | int | str) -> str:
 
 def main() -> None:
     args = parse_args()
+    apply_feature_aliases(args)
     set_seed(args.seed)
     device = resolve_device(args)
     if device.type == "cuda":
         torch.backends.cudnn.benchmark = True
 
-    data = load_matbench_graphs(args)
-    graph_config: StructureGraphConfig = data["graph_config"]
-    train_graphs = data["train_graphs"]
-    val_graphs = data["val_graphs"]
-    test_graphs = data["test_graphs"]
-    scaler = TargetScaler(torch.cat([graph.y for graph in train_graphs]))
+    split_data = load_matbench_split(args)
     loader_kwargs = {
         "num_workers": args.num_workers,
         "pin_memory": args.pin_memory and device.type == "cuda",
     }
     if args.num_workers > 0:
         loader_kwargs["persistent_workers"] = args.persistent_workers
-    loaders = (
-        DataLoader(train_graphs, batch_size=args.batch_size, shuffle=True, **loader_kwargs),
-        DataLoader(val_graphs, batch_size=args.batch_size, **loader_kwargs)
-        if val_graphs
-        else None,
-        DataLoader(test_graphs, batch_size=args.batch_size, **loader_kwargs),
-    )
 
     print(f"Runtime device: {device}")
-    rows = [
-        run_conv_net(configured_conv_net, args, loaders, scaler, graph_config)
-        for configured_conv_net in args.conv_nets
-    ]
+    rows = []
+    graph_configs = {}
+    target_scalers = {}
+    matbench_metadata = dict(split_data["metadata"])
+    for configured_conv_net in args.conv_nets:
+        model_data = build_graphs_for_conv_net(args, split_data, configured_conv_net)
+        graph_config: StructureGraphConfig = model_data["graph_config"]
+        train_graphs = model_data["train_graphs"]
+        val_graphs = model_data["val_graphs"]
+        test_graphs = model_data["test_graphs"]
+        scaler = TargetScaler(torch.cat([graph.y for graph in train_graphs]))
+        loaders = (
+            DataLoader(train_graphs, batch_size=args.batch_size, shuffle=True, **loader_kwargs),
+            DataLoader(val_graphs, batch_size=args.batch_size, **loader_kwargs)
+            if val_graphs
+            else None,
+            DataLoader(test_graphs, batch_size=args.batch_size, **loader_kwargs),
+        )
+        graph_configs[configured_conv_net] = graph_config_payload(
+            graph_config,
+            conversion_seconds=model_data["conversion_seconds"],
+            train_size=len(train_graphs),
+            val_size=len(val_graphs),
+            test_size=len(test_graphs),
+        )
+        target_scalers[configured_conv_net] = scaler.as_dict()
+        matbench_metadata["train_size"] = len(train_graphs)
+        matbench_metadata["val_size"] = len(val_graphs)
+        rows.append(
+            run_conv_net(configured_conv_net, args, loaders, scaler, graph_config)
+        )
     print_table(rows)
 
     output_dir = Path(args.output_dir)
@@ -438,9 +621,9 @@ def main() -> None:
     stamp = time.strftime("%Y%m%d-%H%M%S")
     payload = {
         "args": vars(args),
-        "matbench": data["metadata"],
-        "graph_config": asdict(graph_config),
-        "target_scaler": scaler.as_dict(),
+        "matbench": matbench_metadata,
+        "graph_configs": graph_configs,
+        "target_scalers": target_scalers,
         "runtime": runtime_info(device),
         "results": rows,
     }

@@ -6,7 +6,7 @@ import json
 import math
 from collections import defaultdict
 from pathlib import Path
-from statistics import mean, stdev
+from statistics import mean
 
 
 METRICS = [
@@ -38,9 +38,16 @@ def _steps_per_model(payload: dict) -> int:
 
 
 def _summary_stats(values: list[float]) -> tuple[float, float]:
-    if len(values) == 1:
-        return values[0], 0.0
-    return mean(values), stdev(values)
+    finite_values = [float(value) for value in values if math.isfinite(float(value))]
+    if not finite_values:
+        return float("nan"), float("nan")
+    if len(finite_values) == 1:
+        return finite_values[0], 0.0
+    metric_mean = mean(finite_values)
+    variance = sum((value - metric_mean) ** 2 for value in finite_values) / (
+        len(finite_values) - 1
+    )
+    return metric_mean, math.sqrt(variance)
 
 
 def main() -> None:
@@ -71,10 +78,21 @@ def main() -> None:
             "model": model_id,
             "conv_net": rows[0]["conv_net"],
             "kan_impl": rows[0].get("kan_impl", "none"),
+            "head_net": rows[0].get("head_net", ""),
+            "head_hidden_dims": rows[0].get("head_hidden_dims", ""),
+            "head_kan_impl": rows[0].get("head_kan_impl", ""),
+            "head_kan_grid_size": rows[0].get("head_kan_grid_size", ""),
+            "atom_features": rows[0].get("atom_features", ""),
+            "edge_features": rows[0].get("edge_features", ""),
+            "node_input_dim": rows[0].get("node_input_dim", ""),
+            "edge_input_dim": rows[0].get("edge_input_dim", ""),
             "folds": len(rows),
             "optimizer_steps_per_fold_mean": mean(row["optimizer_steps"] for row in rows),
             "optimizer_steps_total": sum(row["optimizer_steps"] for row in rows),
         }
+        param_mean, param_std = _summary_stats([float(row["params"]) for row in rows])
+        summary["params_mean"] = param_mean
+        summary["params_std"] = param_std
         for metric in METRICS:
             values = [float(row[metric]) for row in rows]
             metric_mean, metric_std = _summary_stats(values)
@@ -103,14 +121,15 @@ def main() -> None:
         encoding="utf-8",
     )
 
-    print("model | folds | test_mae mean±std | test_rmse mean±std | total steps")
-    print("------+-------+-------------------+--------------------+------------")
+    print("model | folds | params | test_mae mean+/-std | test_rmse mean+/-std | total steps")
+    print("------+-------+--------+-------------------+--------------------+------------")
     for row in summary_rows:
         print(
             f"{row['model']:<5} | "
             f"{row['folds']:<5} | "
-            f"{row['test_mae_mean']:.6g}±{row['test_mae_std']:.6g} | "
-            f"{row['test_rmse_mean']:.6g}±{row['test_rmse_std']:.6g} | "
+            f"{row['params_mean']:.0f} | "
+            f"{row['test_mae_mean']:.6g}+/-{row['test_mae_std']:.6g} | "
+            f"{row['test_rmse_mean']:.6g}+/-{row['test_rmse_std']:.6g} | "
             f"{int(row['optimizer_steps_total'])}"
         )
 

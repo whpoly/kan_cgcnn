@@ -31,6 +31,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--hidden-dim", type=int, default=64)
     parser.add_argument("--head-hidden-dims", type=int, nargs="+", default=[128, 64])
+    parser.add_argument("--kan-head-hidden-dims", type=int, nargs="+", default=[32])
     parser.add_argument("--num-convs", type=int, default=3)
     parser.add_argument("--conv-kan-impl", choices=["spline", "fastkan"], default="fastkan")
     parser.add_argument("--conv-kan-hidden-dim", type=int, default=16)
@@ -39,8 +40,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--weight-decay", type=float, default=1e-5)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--conv-kan-grid-size", type=int, default=8)
+    parser.add_argument("--conv-kan-grid-size", type=int, default=3)
     parser.add_argument("--conv-kan-spline-order", type=int, default=3)
+    parser.add_argument("--mlp-lr", type=float, default=None)
+    parser.add_argument("--kan-lr", type=float, default=None)
+    parser.add_argument("--mlp-weight-decay", type=float, default=None)
+    parser.add_argument("--kan-weight-decay", type=float, default=None)
     parser.add_argument("--forward-iters", type=int, default=80)
     parser.add_argument("--warmup-iters", type=int, default=10)
     parser.add_argument("--output-dir", default="benchmarks")
@@ -69,6 +74,49 @@ def split_dataset(dataset: list, seed: int) -> tuple[list, list, list]:
 
 def count_parameters(model: torch.nn.Module) -> int:
     return sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
+
+
+def optimizer_hparams(conv_net: str, args: argparse.Namespace) -> tuple[float, float]:
+    lr_override = args.kan_lr if conv_net == "kan" else args.mlp_lr
+    wd_override = args.kan_weight_decay if conv_net == "kan" else args.mlp_weight_decay
+    lr = args.lr if lr_override is None else lr_override
+    weight_decay = args.weight_decay if wd_override is None else wd_override
+    return lr, weight_decay
+
+
+def head_hparams(conv_net: str, args: argparse.Namespace) -> tuple[str, list[int]]:
+    if conv_net == "kan":
+        return "kan", list(args.kan_head_hidden_dims)
+    return "mlp", list(args.head_hidden_dims)
+
+
+def adamw_parameter_groups(
+    model: torch.nn.Module,
+    weight_decay: float,
+) -> list[dict[str, object]]:
+    decay_params = []
+    no_decay_params = []
+    for name, parameter in model.named_parameters():
+        if not parameter.requires_grad:
+            continue
+        lower_name = name.lower()
+        if (
+            weight_decay == 0.0
+            or parameter.ndim < 2
+            or lower_name.endswith(".bias")
+            or "bn" in lower_name
+            or "norm" in lower_name
+        ):
+            no_decay_params.append(parameter)
+        else:
+            decay_params.append(parameter)
+
+    groups: list[dict[str, object]] = []
+    if decay_params:
+        groups.append({"params": decay_params, "weight_decay": weight_decay})
+    if no_decay_params:
+        groups.append({"params": no_decay_params, "weight_decay": 0.0})
+    return groups
 
 
 def sync(device: torch.device) -> None:
@@ -147,14 +195,16 @@ def run_conv_net(
     device = torch.device(args.device)
     train_loader, val_loader, test_loader = loaders
     set_seed(args.seed)
+    head_net, head_hidden_dims = head_hparams(conv_net, args)
 
     model = CGCNN(
         node_input_dim=node_dim,
         edge_input_dim=edge_dim,
         hidden_dim=args.hidden_dim,
         num_convs=args.num_convs,
-        head_hidden_dims=args.head_hidden_dims,
+        head_hidden_dims=head_hidden_dims,
         conv_net=conv_net,
+        head_net=head_net,
         conv_kan_impl=args.conv_kan_impl,
         conv_kan_hidden_dim=args.conv_kan_hidden_dim,
         conv_kan_grid_size=args.conv_kan_grid_size,
@@ -162,10 +212,10 @@ def run_conv_net(
         dropout=args.dropout,
     ).to(device)
 
+    lr, weight_decay = optimizer_hparams(conv_net, args)
     optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=args.lr,
-        weight_decay=args.weight_decay,
+        adamw_parameter_groups(model, weight_decay),
+        lr=lr,
     )
     best_state = None
     best_val = float("inf")
@@ -195,7 +245,11 @@ def run_conv_net(
     return {
         "conv_net": conv_net,
         "kan_impl": args.conv_kan_impl if conv_net == "kan" else "none",
+        "head_net": head_net,
+        "head_hidden_dims": " ".join(str(dim) for dim in head_hidden_dims),
         "params": count_parameters(model),
+        "lr": lr,
+        "weight_decay": weight_decay,
         "best_val_mae": best_val,
         "test_mae": test_metrics["mae"],
         "test_rmse": test_metrics["rmse"],
@@ -209,7 +263,11 @@ def print_table(rows: Iterable[dict[str, float | int | str]]) -> None:
     headers = [
         "conv_net",
         "kan_impl",
+        "head_net",
+        "head_hidden_dims",
         "params",
+        "lr",
+        "weight_decay",
         "best_val_mae",
         "test_mae",
         "test_rmse",

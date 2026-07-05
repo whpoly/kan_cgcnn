@@ -20,7 +20,7 @@ class CrystalGraphConv(MessagePassing):
         conv_net: Literal["mlp", "kan"] = "mlp",
         conv_kan_impl: Literal["spline", "fastkan"] = "fastkan",
         conv_kan_hidden_dim: int = 16,
-        conv_kan_grid_size: int = 8,
+        conv_kan_grid_size: int = 3,
         conv_kan_spline_order: int = 3,
         dropout: float = 0.0,
     ) -> None:
@@ -90,7 +90,7 @@ class MLPHead(nn.Module):
 
 
 class CGCNN(nn.Module):
-    """PyG CGCNN with switchable MLP or KAN interaction networks."""
+    """PyG CGCNN with switchable MLP or KAN interaction and readout networks."""
 
     def __init__(
         self,
@@ -101,10 +101,14 @@ class CGCNN(nn.Module):
         head_hidden_dims: Sequence[int] = (32,),
         out_dim: int = 1,
         conv_net: Literal["mlp", "kan"] = "mlp",
+        head_net: Literal["mlp", "kan"] = "mlp",
         conv_kan_impl: Literal["spline", "fastkan"] = "fastkan",
         conv_kan_hidden_dim: int = 16,
-        conv_kan_grid_size: int = 8,
+        conv_kan_grid_size: int = 3,
         conv_kan_spline_order: int = 3,
+        head_kan_impl: Literal["spline", "fastkan"] | None = None,
+        head_kan_grid_size: int | None = None,
+        head_kan_spline_order: int | None = None,
         dropout: float = 0.0,
     ) -> None:
         super().__init__()
@@ -127,23 +131,29 @@ class CGCNN(nn.Module):
         )
         if len(head_hidden_dims) < 1:
             raise ValueError("head_hidden_dims must contain at least h_fea_len")
-        self.conv_to_fc = nn.Linear(hidden_dim, head_hidden_dims[0])
-        self.conv_to_fc_softplus = nn.Softplus()
-        self.fcs = nn.ModuleList(
-            nn.Linear(src, dst) for src, dst in zip(head_hidden_dims[:-1], head_hidden_dims[1:])
-        )
-        self.softpluses = nn.ModuleList(nn.Softplus() for _ in self.fcs)
-        self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
-        self.fc_out = nn.Linear(head_hidden_dims[-1], out_dim)
+        if head_net == "mlp":
+            self.head = MLPHead(
+                hidden_dim,
+                head_hidden_dims,
+                out_dim=out_dim,
+                dropout=dropout,
+            )
+        elif head_net == "kan":
+            self.head = make_kan_mlp(
+                hidden_dim,
+                head_hidden_dims,
+                out_dim,
+                impl=head_kan_impl or conv_kan_impl,
+                dropout=dropout,
+                grid_size=head_kan_grid_size or conv_kan_grid_size,
+                spline_order=head_kan_spline_order or conv_kan_spline_order,
+            )
+        else:
+            raise ValueError(f"unsupported head_net {head_net!r}; expected 'mlp' or 'kan'")
 
     def forward(self, data) -> torch.Tensor:
         x = self.embedding(data.x)
         for conv in self.convs:
             x = conv(x, data.edge_index, data.edge_attr)
         pooled = global_mean_pool(x, data.batch)
-        out = self.conv_to_fc_softplus(self.conv_to_fc(pooled))
-        out = self.dropout(out)
-        for fc, softplus in zip(self.fcs, self.softpluses):
-            out = softplus(fc(out))
-            out = self.dropout(out)
-        return self.fc_out(out).squeeze(-1)
+        return self.head(pooled).squeeze(-1)

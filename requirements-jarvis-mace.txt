@@ -1,0 +1,5 @@
+-r requirements.txt
+ase>=3.23
+jarvis-tools
+mace-torch>=0.3.10
+tqdm>=4.66

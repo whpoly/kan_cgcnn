@@ -2,3 +2,11 @@
 __pycache__/
 .pytest_cache/
 *.py[cod]
+data/
+benchmarks/
+*.log
+*.pt
+*.pth
+*.pkl
+*.pkl.gz
+*.npz

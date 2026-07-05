@@ -135,7 +135,7 @@ class RadialBasisFunction(nn.Module):
         self,
         grid_min: float = -2.0,
         grid_max: float = 2.0,
-        num_grids: int = 8,
+        num_grids: int = 3,
         denominator: float | None = None,
     ) -> None:
         super().__init__()
@@ -157,7 +157,7 @@ class FastKANLinear(nn.Module):
         out_features: int,
         grid_min: float = -2.0,
         grid_max: float = 2.0,
-        num_grids: int = 8,
+        num_grids: int = 3,
         use_layernorm: bool = True,
         use_base_update: bool = True,
         spline_weight_init_scale: float = 0.1,
@@ -192,7 +192,7 @@ class FastKANMLP(nn.Module):
         hidden_dims: Sequence[int] | int,
         out_dim: int,
         dropout: float = 0.0,
-        num_grids: int = 8,
+        num_grids: int = 3,
         grid_min: float = -2.0,
         grid_max: float = 2.0,
     ) -> None:
@@ -221,11 +221,11 @@ class FastKANMLP(nn.Module):
 
 def make_kan_mlp(
     in_dim: int,
-    hidden_dim: int,
+    hidden_dim: Sequence[int] | int,
     out_dim: int,
     impl: Literal["spline", "fastkan"] = "fastkan",
     dropout: float = 0.0,
-    grid_size: int = 8,
+    grid_size: int = 3,
     spline_order: int = 3,
 ) -> nn.Module:
     if impl == "spline":

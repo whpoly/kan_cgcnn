@@ -1,0 +1,6 @@
+# Pip-only layer for the already-created modnet-v012-matbench conda env.
+# The older pymatgen/matminer/scikit-learn stack is installed from conda-forge
+# in environment-modnet-v012.yml to avoid Windows source-build issues.
+tensorflow==2.10.1
+tensorflow-probability==0.18.0
+modnet==0.1.12
