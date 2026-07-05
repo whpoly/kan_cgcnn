@@ -1,6 +1,6 @@
 param(
     [ValidateSet("small", "all")]
-    [string]$TaskSet = "small",
+    [string]$TaskSet = "all",
     [string[]]$Tasks = @(),
     [string]$OfficialEnv = "modnet-v012-matbench",
     [string]$KanEnv = "kan-cgcnn-cuda",
@@ -27,6 +27,8 @@ param(
     [string]$Device = "cuda",
     [switch]$RequireCuda,
     [switch]$NoExportFormulas,
+    [int]$FormulaTopK = 20,
+    [double]$FormulaMinAbs = 0.0,
     [switch]$NoMatbenchRecords,
     [switch]$DryRun
 )
@@ -39,8 +41,7 @@ $allTasks = @(
     "matbench_expt_is_metal",
     "matbench_glass",
     "matbench_jdft2d",
-    "matbench_log_gvrh",
-    "matbench_log_kvrh",
+    "matbench_elastic",
     "matbench_mp_e_form",
     "matbench_mp_gap",
     "matbench_mp_is_metal",
@@ -55,8 +56,7 @@ $smallTasks = @(
     "matbench_expt_is_metal",
     "matbench_glass",
     "matbench_jdft2d",
-    "matbench_log_gvrh",
-    "matbench_log_kvrh",
+    "matbench_elastic",
     "matbench_perovskites",
     "matbench_phonons",
     "matbench_steels"
@@ -115,6 +115,8 @@ $metadata = [ordered]@{
     kan_epochs = $Epochs
     kan_batch_size = $BatchSize
     kan_prune_fraction = $PruneKanFraction
+    formula_top_k = $FormulaTopK
+    formula_min_abs = $FormulaMinAbs
     started_at = (Get-Date).ToString("s")
 }
 $metadata | ConvertTo-Json -Depth 8 | Set-Content -Path (Join-Path $KanOutputRoot "combined-run-metadata.json") -Encoding UTF8
@@ -189,6 +191,8 @@ foreach ($task in $Tasks) {
     }
     if (-not $NoExportFormulas) {
         $kanArgs += "--export-formulas"
+        $kanArgs += @("--formula-top-k", "$FormulaTopK")
+        $kanArgs += @("--formula-min-abs", "$FormulaMinAbs")
     }
     if ($NoMatbenchRecords) {
         $kanArgs += "--no-matbench-records"

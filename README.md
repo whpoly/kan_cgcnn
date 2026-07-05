@@ -51,11 +51,61 @@ python scripts\benchmark_modnet_kan.py `
 For the stricter benchmark against official MODNet descriptors, create the
 separate official MODNet environment and run the combined wrapper:
 
+Linux/CUDA server:
+
+```bash
+sbatch scripts/slurm_modnet_kan_all.sh
+```
+
+The SLURM script runs the full MODNet v0.1.12 Matbench benchmark: 13 original
+Matbench tasks represented as 12 benchmark entries, because
+`matbench_log_gvrh` and `matbench_log_kvrh` are trained together as the
+two-output `matbench_elastic` model. It creates missing conda environments,
+exports official MODNet-selected descriptors, trains `mlp`, `fastkan`, and
+`spline` on those descriptors, prunes KAN parameters, and writes readable
+explicit formula files with held-out metrics.
+
+For a quicker debug run that skips the three large MP tasks:
+
+```bash
+TASK_SET=small sbatch scripts/slurm_modnet_kan_all.sh
+```
+
+The default reliable tuning protocol is:
+
+- official MODNet v0.1.12 descriptors and relevance-redundancy feature order;
+- 12 benchmark entries, 5 folds each. This follows the MODNet
+  v0.1.12 benchmark convention: `matbench_log_gvrh` and `matbench_log_kvrh`
+  are trained together as the two-output `matbench_elastic` model, then
+  reported per target, covering all 13 original Matbench tasks;
+- tuning uses folds `0 1` with an internal validation split and never selects
+  hyperparameters on the Matbench test fold;
+- final benchmark reruns the selected configuration on folds `0 1 2 3 4`;
+- MLP tries wider hidden blocks such as `256/512` common dims;
+- KAN tries smaller blocks such as `32/64/128` common dims, matching the KAN
+  paper's motivation that narrower KANs can compete with wider MLPs;
+- the search includes `target_dim=0`, so shallower formulas without the final
+  hidden target block are tested;
+- KAN grid sizes `3` and `5`, learning rates, MAE/RMSE losses, and pruning
+  fractions `0.3/0.5` are tuned;
+- final KAN formula export uses `--formula-top-k 20`.
+
+`--formula-top-k` only controls how many nonzero terms are shown per neuron in
+the text formula; it does not change training, pruning, or benchmark metrics.
+The formula file reports held-out metrics after pruning (`MAE/RMSE/R2` for
+regression, `accuracy/balanced_accuracy/F1/ROC-AUC` for classification) plus
+`mean_abs_coefficient_coverage` and `min_abs_coefficient_coverage`. Coverage is
+the fraction of absolute coefficient mass retained by the displayed terms; with
+`--formula-top-k 0`, the formula is exact after pruning and coverage is 1.0.
+
+Windows PowerShell:
+
 ```powershell
 conda env create -f environment-modnet-v012.yml
 powershell -ExecutionPolicy Bypass -File scripts\run_modnet_kan_matbench.ps1 `
   -Tasks matbench_phonons `
-  -RequireCuda
+  -RequireCuda `
+  -FormulaTopK 20
 ```
 
 Benchmark outputs are intentionally ignored by Git via `benchmarks/`; upload the
@@ -180,9 +230,12 @@ descriptors:
 powershell -ExecutionPolicy Bypass -File scripts\run_modnet_kan_matbench.ps1
 ```
 
-The default task set is the Matbench tasks below 20,000 samples. It first runs
-official MODNet in `modnet-v012-matbench`, then runs `mlp`, `fastkan`, and
-`spline` in `kan-cgcnn-cuda` on the exported fold descriptors.
+The default task set is the full MODNet Matbench benchmark, with the
+`matbench_elastic` special case: `matbench_log_gvrh` and `matbench_log_kvrh`
+are trained as one two-output model. It first runs official MODNet in
+`modnet-v012-matbench`, then runs `mlp`, `fastkan`, and `spline` in
+`kan-cgcnn-cuda` on the exported fold descriptors. Use `--task-set small` only
+for a faster debug run.
 
 ```powershell
 conda env create -f environment-modnet-v012.yml

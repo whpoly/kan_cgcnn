@@ -27,16 +27,19 @@ TASK_TYPES = ("regression", "classification")
 METRIC_NAMES = [
     "mae",
     "rmse",
+    "r2",
     "accuracy",
     "balanced_accuracy",
     "f1",
     "rocauc",
 ]
 MAXIMIZE_METRICS = {
+    "best_val_r2",
     "best_val_accuracy",
     "best_val_balanced_accuracy",
     "best_val_f1",
     "best_val_rocauc",
+    "test_r2",
     "test_accuracy",
     "test_balanced_accuracy",
     "test_f1",
@@ -69,12 +72,14 @@ def parse_args() -> argparse.Namespace:
             "auto",
             "best_val_mae",
             "best_val_rmse",
+            "best_val_r2",
             "best_val_accuracy",
             "best_val_balanced_accuracy",
             "best_val_f1",
             "best_val_rocauc",
             "test_mae",
             "test_rmse",
+            "test_r2",
             "test_accuracy",
             "test_balanced_accuracy",
             "test_f1",
@@ -84,10 +89,25 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--featurizer-preset", choices=FEATURE_PRESETS, default="auto")
     parser.add_argument("--featurizer-jobs", type=int, default=1)
+    parser.add_argument(
+        "--precomputed-feature-dir",
+        default=None,
+        help=(
+            "Directory containing official MODNet-style fold exports. Passed through "
+            "to benchmark_modnet_kan.py for both tuning and final benchmarking."
+        ),
+    )
     parser.add_argument("--n-feature-candidates", type=int, nargs="+", default=None)
     parser.add_argument("--common-dim-candidates", type=int, nargs="+", default=None)
     parser.add_argument("--group-dim-candidates", type=int, nargs="+", default=None)
     parser.add_argument("--property-dim-candidates", type=int, nargs="+", default=None)
+    parser.add_argument(
+        "--target-dim-candidates",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Candidate target-block dims. Use 0 to remove the target block.",
+    )
     parser.add_argument("--kan-grid-size-candidates", type=int, nargs="+", default=None)
     parser.add_argument("--kan-spline-order-candidates", type=int, nargs="+", default=None)
     parser.add_argument("--lr-candidates", type=float, nargs="+", default=None)
@@ -146,6 +166,8 @@ def parse_args() -> argparse.Namespace:
 
 
 def matbench_task_type(dataset: str) -> str:
+    if dataset == "matbench_elastic":
+        return "regression"
     from matbench.metadata import mbv01_metadata
 
     return str(mbv01_metadata[dataset].task_type)
@@ -180,19 +202,48 @@ def metric_sort_value(value: Any, metric: str) -> tuple[int, float]:
     return (0, number)
 
 
-def candidate_space(args: argparse.Namespace) -> dict[str, list[Any]]:
+def candidate_space(args: argparse.Namespace, family: str) -> dict[str, list[Any]]:
+    if family == "mlp":
+        defaults = {
+            "n_features": [256, 512],
+            "common_dim": [256, 512],
+            "group_dim": [128, 256],
+            "property_dim": [64, 128],
+            "target_dim": [0, 64],
+            "kan_grid_size": [3],
+            "kan_spline_order": [3],
+            "lr": [3e-4, 1e-3],
+            "weight_decay": [0.0, 1e-6],
+            "dropout": [0.0, 0.05],
+            "prune_kan_fraction": [0.0],
+        }
+    else:
+        defaults = {
+            "n_features": [128, 256, 512],
+            "common_dim": [32, 64, 128],
+            "group_dim": [16, 32, 64],
+            "property_dim": [0, 8, 16, 32],
+            "target_dim": [0, 8, 16],
+            "kan_grid_size": [3, 5],
+            "kan_spline_order": [3],
+            "lr": [3e-4, 1e-3, 2e-3],
+            "weight_decay": [0.0, 1e-6],
+            "dropout": [0.0],
+            "prune_kan_fraction": [0.3, 0.5],
+        }
     return {
-        "n_features": args.n_feature_candidates or [128, 256, 280, 512],
-        "common_dim": args.common_dim_candidates or [64, 128, 512],
-        "group_dim": args.group_dim_candidates or [32, 64, 128],
-        "property_dim": args.property_dim_candidates or [16, 32, 64],
-        "kan_grid_size": args.kan_grid_size_candidates or [3, 5],
-        "kan_spline_order": args.kan_spline_order_candidates or [3],
-        "lr": args.lr_candidates or [3e-4, 1e-3, 0.005],
-        "weight_decay": args.weight_decay_candidates or [0.0, 1e-6, 1e-5],
-        "dropout": args.dropout_candidates or [0.0, 0.05],
+        "n_features": args.n_feature_candidates or defaults["n_features"],
+        "common_dim": args.common_dim_candidates or defaults["common_dim"],
+        "group_dim": args.group_dim_candidates or defaults["group_dim"],
+        "property_dim": args.property_dim_candidates or defaults["property_dim"],
+        "target_dim": args.target_dim_candidates or defaults["target_dim"],
+        "kan_grid_size": args.kan_grid_size_candidates or defaults["kan_grid_size"],
+        "kan_spline_order": args.kan_spline_order_candidates or defaults["kan_spline_order"],
+        "lr": args.lr_candidates or defaults["lr"],
+        "weight_decay": args.weight_decay_candidates or defaults["weight_decay"],
+        "dropout": args.dropout_candidates or defaults["dropout"],
         "loss": args.loss_candidates,
-        "prune_kan_fraction": args.prune_kan_fraction_candidates or [0.0],
+        "prune_kan_fraction": args.prune_kan_fraction_candidates or defaults["prune_kan_fraction"],
     }
 
 
@@ -212,12 +263,12 @@ def make_trials(args: argparse.Namespace) -> list[dict[str, Any]]:
 
 
 def compact_trials(args: argparse.Namespace, family: str) -> list[dict[str, Any]]:
-    space = candidate_space(args)
+    space = candidate_space(args, family)
     base_specs = [
-        (space["n_features"][0], space["common_dim"][0], space["group_dim"][0], space["property_dim"][0], 3, 3, space["lr"][0], space["weight_decay"][0], space["dropout"][0]),
-        (space["n_features"][min(1, len(space["n_features"]) - 1)], space["common_dim"][0], space["group_dim"][0], space["property_dim"][0], 5, 3, space["lr"][min(1, len(space["lr"]) - 1)], space["weight_decay"][0], space["dropout"][0]),
-        (space["n_features"][min(2, len(space["n_features"]) - 1)], space["common_dim"][min(1, len(space["common_dim"]) - 1)], space["group_dim"][min(1, len(space["group_dim"]) - 1)], space["property_dim"][min(1, len(space["property_dim"]) - 1)], 3, 3, space["lr"][min(1, len(space["lr"]) - 1)], space["weight_decay"][min(1, len(space["weight_decay"]) - 1)], space["dropout"][min(1, len(space["dropout"]) - 1)]),
-        (280 if 280 in space["n_features"] else space["n_features"][min(2, len(space["n_features"]) - 1)], 512 if 512 in space["common_dim"] else space["common_dim"][-1], 128 if 128 in space["group_dim"] else space["group_dim"][-1], 64 if 64 in space["property_dim"] else space["property_dim"][-1], 5, 3, 0.005 if 0.005 in space["lr"] else space["lr"][-1], 0.0, 0.0),
+        (space["n_features"][0], space["common_dim"][0], space["group_dim"][0], space["property_dim"][0], space["target_dim"][0], 3, 3, space["lr"][0], space["weight_decay"][0], space["dropout"][0]),
+        (space["n_features"][min(1, len(space["n_features"]) - 1)], space["common_dim"][0], space["group_dim"][0], space["property_dim"][0], space["target_dim"][min(1, len(space["target_dim"]) - 1)], 5, 3, space["lr"][min(1, len(space["lr"]) - 1)], space["weight_decay"][0], space["dropout"][0]),
+        (space["n_features"][min(2, len(space["n_features"]) - 1)], space["common_dim"][min(1, len(space["common_dim"]) - 1)], space["group_dim"][min(1, len(space["group_dim"]) - 1)], space["property_dim"][min(1, len(space["property_dim"]) - 1)], space["target_dim"][0], 3, 3, space["lr"][min(1, len(space["lr"]) - 1)], space["weight_decay"][min(1, len(space["weight_decay"]) - 1)], space["dropout"][min(1, len(space["dropout"]) - 1)]),
+        (space["n_features"][-1], space["common_dim"][-1], space["group_dim"][-1], space["property_dim"][-1], space["target_dim"][-1], 5, 3, space["lr"][-1], space["weight_decay"][0], space["dropout"][0]),
     ]
     trials: dict[str, dict[str, Any]] = {}
     prune_values = [0.0] if family == "mlp" else space["prune_kan_fraction"]
@@ -230,7 +281,7 @@ def compact_trials(args: argparse.Namespace, family: str) -> list[dict[str, Any]
 
 
 def random_trials(args: argparse.Namespace, family: str) -> list[dict[str, Any]]:
-    space = candidate_space(args)
+    space = candidate_space(args, family)
     rng = random.Random(args.seed + MODEL_FAMILIES.index(family))
     trials: dict[str, dict[str, Any]] = {}
     for trial in compact_trials(args, family):
@@ -246,6 +297,7 @@ def random_trials(args: argparse.Namespace, family: str) -> list[dict[str, Any]]
             rng.choice(space["common_dim"]),
             rng.choice(space["group_dim"]),
             rng.choice(space["property_dim"]),
+            rng.choice(space["target_dim"]),
             rng.choice(space["kan_grid_size"]),
             rng.choice(space["kan_spline_order"]),
             rng.choice(space["lr"]),
@@ -261,7 +313,7 @@ def random_trials(args: argparse.Namespace, family: str) -> list[dict[str, Any]]
 
 
 def grid_trials(args: argparse.Namespace, family: str) -> list[dict[str, Any]]:
-    space = candidate_space(args)
+    space = candidate_space(args, family)
     grid_sizes = [0] if family == "mlp" else space["kan_grid_size"]
     spline_orders = [0] if family != "spline" else space["kan_spline_order"]
     return [
@@ -271,6 +323,7 @@ def grid_trials(args: argparse.Namespace, family: str) -> list[dict[str, Any]]:
             space["common_dim"],
             space["group_dim"],
             space["property_dim"],
+            space["target_dim"],
             grid_sizes,
             spline_orders,
             space["lr"],
@@ -288,6 +341,7 @@ def make_trial(
     common_dim: int,
     group_dim: int,
     property_dim: int,
+    target_dim: int,
     kan_grid_size: int,
     kan_spline_order: int,
     lr: float,
@@ -301,7 +355,7 @@ def make_trial(
         grid_part += f"_ko{kan_spline_order}"
     prune_part = "" if family == "mlp" or prune_kan_fraction <= 0 else f"_prune{format_float_id(prune_kan_fraction)}"
     trial_id = (
-        f"{family}_nf{n_features}_c{common_dim}_g{group_dim}_p{property_dim}_"
+        f"{family}_nf{n_features}_c{common_dim}_g{group_dim}_p{property_dim}_t{target_dim}_"
         f"{grid_part}_lr{format_float_id(lr)}_"
         f"wd{format_float_id(weight_decay)}_do{format_float_id(dropout)}_loss{loss}{prune_part}"
     )
@@ -312,6 +366,7 @@ def make_trial(
         "common_dim": int(common_dim),
         "group_dim": int(group_dim),
         "property_dim": int(property_dim),
+        "target_dim": int(target_dim),
         "kan_grid_size": int(kan_grid_size),
         "kan_spline_order": int(kan_spline_order),
         "lr": float(lr),
@@ -347,10 +402,6 @@ def benchmark_command(
         *[str(fold) for fold in folds],
         "--models",
         family,
-        "--featurizer-preset",
-        args.featurizer_preset,
-        "--featurizer-jobs",
-        str(args.featurizer_jobs),
         "--n-features",
         str(trial["n_features"]),
         "--common-dims",
@@ -359,6 +410,8 @@ def benchmark_command(
         str(trial["group_dim"]),
         "--property-dims",
         str(trial["property_dim"]),
+        "--target-dims",
+        str(trial["target_dim"]),
         "--kan-grid-size",
         str(max(1, int(trial["kan_grid_size"]))),
         "--kan-spline-order",
@@ -396,6 +449,17 @@ def benchmark_command(
         "--output-dir",
         str(output_dir),
     ]
+    if args.precomputed_feature_dir:
+        cmd.extend(["--precomputed-feature-dir", args.precomputed_feature_dir])
+    else:
+        cmd.extend(
+            [
+                "--featurizer-preset",
+                args.featurizer_preset,
+                "--featurizer-jobs",
+                str(args.featurizer_jobs),
+            ]
+        )
     if args.require_cuda:
         cmd.append("--require-cuda")
     if train_size is not None:
@@ -443,6 +507,9 @@ def summarize_trial(
                     **trial,
                     "fold": int(result["fold"]),
                     "task_type": result.get("task_type", ""),
+                    "target": result.get("target", ""),
+                    "target_names": result.get("target_names", ""),
+                    "n_targets": result.get("n_targets", 1),
                     "params": int(result["params"]),
                     "effective_params": int(result.get("effective_params", result["params"])),
                     "pruned_params": int(result.get("pruned_params", 0)),
@@ -459,6 +526,9 @@ def summarize_trial(
                     },
                 }
             )
+            for key, value in result.items():
+                if key.startswith(("best_val_", "test_")) and key not in rows[-1]:
+                    rows[-1][key] = safe_float(value)
 
     summary = {
         **trial,
@@ -482,6 +552,19 @@ def summarize_trial(
         finite_values = [value for value in values if math.isfinite(value)]
         summary[f"{metric}_mean"] = mean(finite_values) if finite_values else float("nan")
         summary[f"{metric}_std"] = stdev(finite_values) if len(finite_values) > 1 else 0.0
+    dynamic_metric_keys = sorted(
+        key
+        for row in rows
+        for key in row
+        if key.startswith(("best_val_", "test_"))
+        and f"{key}_mean" not in summary
+        and f"{key}_std" not in summary
+    )
+    for key in dynamic_metric_keys:
+        values = [safe_float(row.get(key)) for row in rows]
+        finite_values = [value for value in values if math.isfinite(value)]
+        summary[f"{key}_mean"] = mean(finite_values) if finite_values else float("nan")
+        summary[f"{key}_std"] = stdev(finite_values) if len(finite_values) > 1 else 0.0
     return rows, summary
 
 
@@ -645,6 +728,9 @@ def ordered_fieldnames(rows: list[dict[str, Any]]) -> list[str]:
         "trial_id",
         "fold",
         "folds",
+        "target",
+        "target_names",
+        "n_targets",
         "prune_kan_fraction",
         "params_before_prune",
         "params_after_prune",
@@ -668,24 +754,28 @@ def ordered_fieldnames(rows: list[dict[str, Any]]) -> list[str]:
         "pruned_params_mean",
         "best_val_mae",
         "best_val_rmse",
+        "best_val_r2",
         "best_val_rocauc",
         "best_val_accuracy",
         "best_val_balanced_accuracy",
         "best_val_f1",
         "test_mae",
         "test_rmse",
+        "test_r2",
         "test_rocauc",
         "test_accuracy",
         "test_balanced_accuracy",
         "test_f1",
         "best_val_mae_mean",
         "best_val_rmse_mean",
+        "best_val_r2_mean",
         "best_val_rocauc_mean",
         "best_val_accuracy_mean",
         "best_val_balanced_accuracy_mean",
         "best_val_f1_mean",
         "test_mae_mean",
         "test_rmse_mean",
+        "test_r2_mean",
         "test_rocauc_mean",
         "test_accuracy_mean",
         "test_balanced_accuracy_mean",
@@ -694,6 +784,7 @@ def ordered_fieldnames(rows: list[dict[str, Any]]) -> list[str]:
         "common_dim",
         "group_dim",
         "property_dim",
+        "target_dim",
         "kan_grid_size",
         "kan_spline_order",
         "lr",

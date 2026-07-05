@@ -15,6 +15,7 @@ from sklearn.metrics import (
     accuracy_score,
     balanced_accuracy_score,
     f1_score,
+    r2_score,
     roc_auc_score,
 )
 from sklearn.impute import SimpleImputer
@@ -43,6 +44,7 @@ TASK_TYPES = ("regression", "classification")
 METRIC_NAMES = [
     "mae",
     "rmse",
+    "r2",
     "accuracy",
     "balanced_accuracy",
     "f1",
@@ -58,8 +60,8 @@ class TargetScaler:
             self.mean = 0.0
             self.std = 1.0
         elif mode == "standard":
-            self.mean = float(values.mean())
-            self.std = float(max(values.std(), 1e-8))
+            self.mean = np.asarray(values.mean(axis=0), dtype=np.float32)
+            self.std = np.maximum(np.asarray(values.std(axis=0), dtype=np.float32), 1e-8)
         else:
             raise ValueError("target scaler mode must be 'none' or 'standard'")
 
@@ -67,10 +69,26 @@ class TargetScaler:
         return ((values - self.mean) / self.std).astype(np.float32, copy=False)
 
     def inverse_transform_tensor(self, values: torch.Tensor) -> torch.Tensor:
-        return values * self.std + self.mean
+        std = torch.as_tensor(self.std, dtype=values.dtype, device=values.device)
+        mean = torch.as_tensor(self.mean, dtype=values.dtype, device=values.device)
+        return values * std + mean
 
-    def as_dict(self) -> dict[str, float]:
-        return {"mode": self.mode, "mean": self.mean, "std": self.std}
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "mode": self.mode,
+            "mean": _json_ready(self.mean),
+            "std": _json_ready(self.std),
+        }
+
+
+def _json_ready(value: Any) -> Any:
+    if isinstance(value, np.ndarray):
+        if value.ndim == 0:
+            return value.item()
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
 
 
 def parse_args() -> argparse.Namespace:
@@ -96,6 +114,62 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--group-dims", type=int, nargs="+", default=[32])
     parser.add_argument("--property-dims", type=int, nargs="+", default=[16])
     parser.add_argument("--target-dims", type=int, nargs="*", default=[])
+    parser.add_argument(
+        "--mlp-common-dims",
+        type=int,
+        nargs="+",
+        default=None,
+        help="MLP-only common hidden dims. Defaults to --common-dims.",
+    )
+    parser.add_argument(
+        "--mlp-group-dims",
+        type=int,
+        nargs="+",
+        default=None,
+        help="MLP-only group hidden dims. Defaults to --group-dims.",
+    )
+    parser.add_argument(
+        "--mlp-property-dims",
+        type=int,
+        nargs="+",
+        default=None,
+        help="MLP-only property hidden dims. Defaults to --property-dims.",
+    )
+    parser.add_argument(
+        "--mlp-target-dims",
+        type=int,
+        nargs="*",
+        default=None,
+        help="MLP-only target hidden dims. Defaults to --target-dims.",
+    )
+    parser.add_argument(
+        "--kan-common-dims",
+        type=int,
+        nargs="+",
+        default=None,
+        help="KAN-only common hidden dims. Defaults to --common-dims.",
+    )
+    parser.add_argument(
+        "--kan-group-dims",
+        type=int,
+        nargs="+",
+        default=None,
+        help="KAN-only group hidden dims. Defaults to --group-dims.",
+    )
+    parser.add_argument(
+        "--kan-property-dims",
+        type=int,
+        nargs="+",
+        default=None,
+        help="KAN-only property hidden dims. Defaults to --property-dims.",
+    )
+    parser.add_argument(
+        "--kan-target-dims",
+        type=int,
+        nargs="*",
+        default=None,
+        help="KAN-only target hidden dims. Defaults to --target-dims.",
+    )
     parser.add_argument("--kan-impl", choices=["fastkan", "spline"], default="fastkan")
     parser.add_argument("--kan-grid-size", type=int, default=5)
     parser.add_argument("--kan-spline-order", type=int, default=3)
@@ -147,13 +221,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--export-formulas",
         action="store_true",
-        help="Write sparse layerwise formula text files for KAN-family models after pruning.",
+        help=(
+            "Write readable explicit formula files for KAN-family models after "
+            "optional pruning. Use --formula-top-k 0 for exact untruncated formulas."
+        ),
     )
     parser.add_argument(
         "--formula-top-k",
         type=int,
         default=40,
-        help="Maximum terms per layer/output branch in exported formula files; 0 writes all nonzero terms.",
+        help=(
+            "Maximum nonzero terms per neuron in exported formula files. "
+            "Use 0 to write every nonzero term after pruning."
+        ),
     )
     parser.add_argument(
         "--formula-min-abs",
@@ -290,16 +370,57 @@ def adamw_parameter_groups(
 
 
 def select_subset(items, targets, size: int | None, seed: int):
+    targets_arr = np.asarray(targets, dtype=np.float32)
     if size is None or size >= len(items):
-        return list(items), np.asarray(targets, dtype=np.float32)
+        return list(items), targets_arr
     rng = np.random.default_rng(seed)
     indices = rng.choice(len(items), size=size, replace=False)
-    return [items.iloc[i] for i in indices], np.asarray([targets.iloc[i] for i in indices], dtype=np.float32)
+    selected_items = [
+        items.iloc[int(i)] if hasattr(items, "iloc") else items[int(i)]
+        for i in indices
+    ]
+    return selected_items, targets_arr[indices]
+
+
+def as_2d_targets(values: np.ndarray) -> np.ndarray:
+    values = np.asarray(values, dtype=np.float32)
+    if values.ndim == 1:
+        return values.reshape(-1, 1)
+    if values.ndim == 2:
+        return values
+    raise ValueError(f"targets must be 1D or 2D, got shape {values.shape}")
+
+
+def target_names_from_metadata(metadata: dict[str, Any]) -> list[str]:
+    names = metadata.get("target_names")
+    if names:
+        return [str(name) for name in names]
+    return [str(metadata.get("target", "target"))]
+
+
+def target_display_name(names: list[str]) -> str:
+    return names[0] if len(names) == 1 else "+".join(names)
+
+
+def _target_metric_suffix(name: str) -> str:
+    return "__" + _safe_symbol(name)
+
+
+def feature_selection_target(values: np.ndarray) -> np.ndarray:
+    values = as_2d_targets(values)
+    if values.shape[1] == 1:
+        return values[:, 0]
+    means = values.mean(axis=0, keepdims=True)
+    stds = np.maximum(values.std(axis=0, keepdims=True), 1e-8)
+    return ((values - means) / stds).mean(axis=1)
 
 
 def load_matbench_split(args: argparse.Namespace, fold: int) -> dict[str, Any]:
     from matbench.metadata import mbv01_metadata
     from matbench.task import MatbenchTask
+
+    if args.dataset == "matbench_elastic":
+        return load_elastic_matbench_split(args, fold)
 
     metadata = mbv01_metadata[args.dataset]
     if metadata.input_type not in ("structure", "composition"):
@@ -336,6 +457,7 @@ def load_matbench_split(args: argparse.Namespace, fold: int) -> dict[str, Any]:
             "fold": fold,
             "task_type": metadata.task_type,
             "target": metadata.target,
+            "target_names": [metadata.target],
             "input_type": metadata.input_type,
             "unit": getattr(metadata, "unit", None),
             "mad": getattr(metadata, "mad", None),
@@ -350,6 +472,92 @@ def load_matbench_split(args: argparse.Namespace, fold: int) -> dict[str, Any]:
         "test_inputs": test_inputs,
         "test_targets": test_targets,
     }
+
+
+def load_elastic_matbench_split(args: argparse.Namespace, fold: int) -> dict[str, Any]:
+    from matbench.metadata import mbv01_metadata
+    from matbench.task import MatbenchTask
+
+    args.loss = validate_task_loss("regression", args.loss)
+    source_tasks = ["matbench_log_gvrh", "matbench_log_kvrh"]
+    loaded_tasks = []
+    train_inputs = None
+    test_inputs = None
+    train_targets = []
+    test_targets = []
+    official_test_size = 0
+    for task_name in source_tasks:
+        task = MatbenchTask(task_name, autoload=False)
+        task.load()
+        fold_train_inputs, fold_train_targets = task.get_train_and_val_data(fold)
+        if train_inputs is None:
+            train_inputs = fold_train_inputs
+        else:
+            assert_aligned_materials(train_inputs, fold_train_inputs, task_name)
+        train_targets.append(np.asarray(fold_train_targets, dtype=np.float32))
+
+        if args.skip_test_eval:
+            fold_key = task.folds_map[fold]
+            official_test_size = len(task.validation[fold_key].test)
+        else:
+            fold_test_inputs, fold_test_targets = task.get_test_data(fold, include_target=True)
+            if test_inputs is None:
+                test_inputs = fold_test_inputs
+            else:
+                assert_aligned_materials(test_inputs, fold_test_inputs, task_name)
+            test_targets.append(np.asarray(fold_test_targets, dtype=np.float32))
+            official_test_size = len(fold_test_targets)
+        loaded_tasks.append(task_name)
+
+    if train_inputs is None:
+        raise RuntimeError("No elastic train inputs were loaded")
+    target_names = [str(mbv01_metadata[task].target) for task in source_tasks]
+    train_y = np.column_stack(train_targets).astype(np.float32)
+    train_inputs, train_y = select_subset(train_inputs, train_y, args.train_size, args.seed)
+    if args.skip_test_eval:
+        test_y = np.empty((0, len(target_names)), dtype=np.float32)
+        test_size = 0
+    else:
+        if test_inputs is None:
+            raise RuntimeError("No elastic test inputs were loaded")
+        test_y = np.column_stack(test_targets).astype(np.float32)
+        test_inputs, test_y = select_subset(test_inputs, test_y, args.test_size, args.seed + 1)
+        test_size = len(test_inputs)
+
+    return {
+        "metadata": {
+            "dataset": args.dataset,
+            "fold": fold,
+            "task_type": "regression",
+            "target": target_display_name(target_names),
+            "target_names": target_names,
+            "source_tasks": loaded_tasks,
+            "input_type": "structure",
+            "unit": None,
+            "mad": None,
+            "frac_true": None,
+            "n_samples": int(mbv01_metadata["matbench_log_gvrh"].n_samples),
+            "train_and_val_size": len(train_inputs),
+            "test_size": test_size,
+            "official_test_size": official_test_size,
+        },
+        "train_inputs": train_inputs,
+        "train_targets": train_y,
+        "test_inputs": test_inputs,
+        "test_targets": test_y,
+    }
+
+
+def assert_aligned_materials(reference: Any, candidate: Any, task_name: str) -> None:
+    if len(reference) != len(candidate):
+        raise RuntimeError(f"{task_name} split length does not match the elastic reference")
+    for idx, (left, right) in enumerate(zip(reference, candidate)):
+        left_formula = getattr(getattr(left, "composition", None), "reduced_formula", str(left))
+        right_formula = getattr(getattr(right, "composition", None), "reduced_formula", str(right))
+        if left_formula != right_formula:
+            raise RuntimeError(
+                f"{task_name} material order differs at row {idx}: {left_formula} != {right_formula}"
+            )
 
 
 def find_precomputed_fold_dir(base_dir: Path, fold: int) -> Path:
@@ -383,13 +591,16 @@ def load_precomputed_feature_split(args: argparse.Namespace, fold: int) -> dict[
 
     if args.precomputed_feature_dir is None:
         raise ValueError("--precomputed-feature-dir was not provided")
-    metadata = mbv01_metadata[args.dataset]
-    if metadata.task_type not in TASK_TYPES:
+    synthetic_elastic = args.dataset == "matbench_elastic"
+    metadata = None if synthetic_elastic else mbv01_metadata[args.dataset]
+    task_type = "regression" if synthetic_elastic else str(metadata.task_type)
+    input_type = "structure" if synthetic_elastic else str(metadata.input_type)
+    if task_type not in TASK_TYPES:
         raise ValueError(
-            f"{args.dataset} task_type is {metadata.task_type!r}; expected one of {TASK_TYPES}"
+            f"{args.dataset} task_type is {task_type!r}; expected one of {TASK_TYPES}"
         )
-    args.loss = validate_task_loss(metadata.task_type, args.loss)
-    if metadata.task_type == "classification" and args.target_scale != "none":
+    args.loss = validate_task_loss(task_type, args.loss)
+    if task_type == "classification" and args.target_scale != "none":
         raise ValueError("Classification tasks require --target-scale none")
 
     fold_dir = find_precomputed_fold_dir(Path(args.precomputed_feature_dir), fold)
@@ -425,11 +636,22 @@ def load_precomputed_feature_split(args: argparse.Namespace, fold: int) -> dict[
             fold_dir / f"test_targets_f{fold}.csv",
         ]
     )
-    target_column = str(metadata.target)
-    if target_column not in train_targets_frame.columns:
-        target_column = str(train_targets_frame.columns[0])
-    if target_column not in test_targets_frame.columns:
-        target_column = str(test_targets_frame.columns[0])
+    if synthetic_elastic:
+        target_columns = list(train_targets_frame.columns)
+        if len(target_columns) < 2:
+            raise ValueError(
+                "matbench_elastic precomputed target files must contain both elastic targets"
+            )
+        missing = [column for column in target_columns if column not in test_targets_frame.columns]
+        if missing:
+            raise ValueError(f"test target file is missing columns: {missing}")
+    else:
+        target_column = str(metadata.target)
+        if target_column not in train_targets_frame.columns:
+            target_column = str(train_targets_frame.columns[0])
+        if target_column not in test_targets_frame.columns:
+            target_column = str(test_targets_frame.columns[0])
+        target_columns = [target_column]
 
     feature_order_path = fold_dir / "feature_order.json"
     if feature_order_path.exists():
@@ -444,13 +666,15 @@ def load_precomputed_feature_split(args: argparse.Namespace, fold: int) -> dict[
         "metadata": {
             "dataset": args.dataset,
             "fold": fold,
-            "task_type": metadata.task_type,
-            "target": target_column,
-            "input_type": metadata.input_type,
-            "unit": getattr(metadata, "unit", None),
-            "mad": getattr(metadata, "mad", None),
-            "frac_true": getattr(metadata, "frac_true", None),
-            "n_samples": metadata.n_samples,
+            "task_type": task_type,
+            "target": target_display_name([str(column) for column in target_columns]),
+            "target_names": [str(column) for column in target_columns],
+            "source_tasks": ["matbench_log_gvrh", "matbench_log_kvrh"] if synthetic_elastic else [args.dataset],
+            "input_type": input_type,
+            "unit": None if synthetic_elastic else getattr(metadata, "unit", None),
+            "mad": None if synthetic_elastic else getattr(metadata, "mad", None),
+            "frac_true": None if synthetic_elastic else getattr(metadata, "frac_true", None),
+            "n_samples": len(train_features) + len(test_features) if synthetic_elastic else metadata.n_samples,
             "train_and_val_size": len(train_features),
             "test_size": len(test_features),
             "official_test_size": len(test_features),
@@ -459,8 +683,8 @@ def load_precomputed_feature_split(args: argparse.Namespace, fold: int) -> dict[
         "precomputed_features": True,
         "train_features": train_features,
         "test_features": test_features,
-        "train_targets": train_targets_frame[target_column].to_numpy(dtype=np.float32),
-        "test_targets": test_targets_frame[target_column].to_numpy(dtype=np.float32),
+        "train_targets": train_targets_frame[target_columns].to_numpy(dtype=np.float32),
+        "test_targets": test_targets_frame[target_columns].to_numpy(dtype=np.float32),
     }
 
 
@@ -532,18 +756,19 @@ def make_loader(
 def build_model(
     model_name: str,
     n_feat: int,
-    target_name: str,
+    target_names: list[str],
     args: argparse.Namespace,
 ) -> MODNetKAN:
     family = canonical_model_name(model_name, args)
+    common_dims, group_dims, property_dims, target_dims = model_dims_for_family(family, args)
     return MODNetKAN(
         n_feat=n_feat,
-        targets=[[[target_name]]],
+        targets=[[target_names]],
         num_neurons=(
-            args.common_dims,
-            args.group_dims,
-            args.property_dims,
-            args.target_dims,
+            common_dims,
+            group_dims,
+            property_dims,
+            target_dims,
         ),
         block_type="mlp" if family == "mlp" else "kan",
         kan_impl="spline" if family == "spline" else "fastkan",
@@ -557,6 +782,29 @@ def canonical_model_name(model_name: str, args: argparse.Namespace) -> str:
     if model_name == "kan":
         return args.kan_impl
     return model_name
+
+
+def model_dims_for_family(
+    family: str,
+    args: argparse.Namespace,
+) -> tuple[list[int], list[int], list[int], list[int]]:
+    if family == "mlp":
+        return (
+            clean_hidden_dims(args.mlp_common_dims or args.common_dims),
+            clean_hidden_dims(args.mlp_group_dims or args.group_dims),
+            clean_hidden_dims(args.mlp_property_dims or args.property_dims),
+            clean_hidden_dims(args.mlp_target_dims if args.mlp_target_dims is not None else args.target_dims),
+        )
+    return (
+        clean_hidden_dims(args.kan_common_dims or args.common_dims),
+        clean_hidden_dims(args.kan_group_dims or args.group_dims),
+        clean_hidden_dims(args.kan_property_dims or args.property_dims),
+        clean_hidden_dims(args.kan_target_dims if args.kan_target_dims is not None else args.target_dims),
+    )
+
+
+def clean_hidden_dims(values: list[int] | tuple[int, ...]) -> list[int]:
+    return [int(value) for value in values if int(value) > 0]
 
 
 def regression_loss(
@@ -638,6 +886,7 @@ def metrics_from_predictions(
     pred: torch.Tensor,
     target: torch.Tensor,
     task_type: str,
+    target_names: list[str] | None = None,
 ) -> dict[str, float]:
     if len(pred) == 0:
         return {name: float("nan") for name in METRIC_NAMES}
@@ -655,11 +904,37 @@ def metrics_from_predictions(
             metrics["rocauc"] = float("nan")
         return metrics
 
-    mae = torch.mean(torch.abs(pred - target)).item()
-    rmse = torch.sqrt(F.mse_loss(pred, target)).item()
+    pred_2d = pred.reshape(pred.shape[0], -1)
+    target_2d = target.reshape(target.shape[0], -1)
+    mae = torch.mean(torch.abs(pred_2d - target_2d)).item()
+    rmse = torch.sqrt(F.mse_loss(pred_2d, target_2d)).item()
     metrics = {name: float("nan") for name in METRIC_NAMES}
     metrics["mae"] = mae
     metrics["rmse"] = rmse
+    if len(pred_2d) >= 2:
+        try:
+            metrics["r2"] = float(
+                r2_score(
+                    target_2d.numpy().reshape(-1),
+                    pred_2d.numpy().reshape(-1),
+                )
+            )
+        except ValueError:
+            metrics["r2"] = float("nan")
+    names = target_names or [f"target_{idx}" for idx in range(pred_2d.shape[1])]
+    for idx, name in enumerate(names[: pred_2d.shape[1]]):
+        suffix = _target_metric_suffix(name)
+        pred_col = pred_2d[:, idx]
+        target_col = target_2d[:, idx]
+        metrics[f"mae{suffix}"] = torch.mean(torch.abs(pred_col - target_col)).item()
+        metrics[f"rmse{suffix}"] = torch.sqrt(F.mse_loss(pred_col, target_col)).item()
+        if len(pred_col) >= 2:
+            try:
+                metrics[f"r2{suffix}"] = float(
+                    r2_score(target_col.numpy().reshape(-1), pred_col.numpy().reshape(-1))
+                )
+            except ValueError:
+                metrics[f"r2{suffix}"] = float("nan")
     return metrics
 
 
@@ -682,9 +957,10 @@ def evaluate(
     scaler: TargetScaler,
     device: torch.device,
     task_type: str,
+    target_names: list[str] | None = None,
 ) -> dict[str, float]:
     pred, target = predict_loader(model, loader, scaler, device, task_type)
-    return metrics_from_predictions(pred, target, task_type)
+    return metrics_from_predictions(pred, target, task_type, target_names=target_names)
 
 
 @torch.no_grad()
@@ -713,15 +989,17 @@ def run_model(
     prepared: dict[str, Any],
     args: argparse.Namespace,
     device: torch.device,
-) -> tuple[dict[str, float | int | str], list[float]]:
+) -> tuple[dict[str, float | int | str], list[Any]]:
     set_seed(args.seed)
     model_label = canonical_model_name(model_name, args)
+    common_dims, group_dims, property_dims, target_dims = model_dims_for_family(model_label, args)
     task_type = str(fold_data["metadata"]["task_type"])
-    target_name = str(fold_data["metadata"]["target"])
+    target_names = target_names_from_metadata(fold_data["metadata"])
+    target_name = target_display_name(target_names)
     model = build_model(
         model_name,
         n_feat=prepared["x_train"].shape[1],
-        target_name=target_name,
+        target_names=target_names,
         args=args,
     ).to(device)
     optimizer = torch.optim.AdamW(
@@ -761,7 +1039,14 @@ def run_model(
     for epoch in range(1, args.epochs + 1):
         train_loss = train_one_epoch(model, train_loader, optimizer, device, task_type, args.loss)
         if val_loader is not None:
-            val_metrics = evaluate(model, val_loader, prepared["target_scaler"], device, task_type)
+            val_metrics = evaluate(
+                model,
+                val_loader,
+                prepared["target_scaler"],
+                device,
+                task_type,
+                target_names=target_names,
+            )
             improved = metric_is_better(val_metrics[val_metric_name], best_metric, task_type)
             if improved:
                 best_metric = val_metrics[val_metric_name]
@@ -801,7 +1086,14 @@ def run_model(
     if model_label in ("fastkan", "spline") and args.prune_kan_fraction > 0:
         pruned_params = apply_global_magnitude_pruning(model, args.prune_kan_fraction)
         if val_loader is not None:
-            best_val_metrics = evaluate(model, val_loader, prepared["target_scaler"], device, task_type)
+            best_val_metrics = evaluate(
+                model,
+                val_loader,
+                prepared["target_scaler"],
+                device,
+                task_type,
+                target_names=target_names,
+            )
     if test_loader is None:
         test_prediction = torch.empty(0)
         test_metrics = {name: float("nan") for name in METRIC_NAMES}
@@ -814,7 +1106,12 @@ def run_model(
             device,
             task_type,
         )
-        test_metrics = metrics_from_predictions(test_prediction, test_target, task_type)
+        test_metrics = metrics_from_predictions(
+            test_prediction,
+            test_target,
+            task_type,
+            target_names=target_names,
+        )
         forward_features = prepared["x_test"]
     forward_ms = benchmark_forward(
         model,
@@ -827,11 +1124,18 @@ def run_model(
     row = {
         "fold": fold_data["metadata"]["fold"],
         "task_type": task_type,
+        "target": target_name,
+        "target_names": ";".join(target_names),
+        "n_targets": len(target_names),
         "model": model_label,
         "block_type": "mlp" if model_label == "mlp" else "kan",
         "kan_impl": model_label if model_label in ("fastkan", "spline") else "none",
         "kan_grid_size": args.kan_grid_size if model_label in ("fastkan", "spline") else "none",
         "kan_spline_order": args.kan_spline_order if model_label == "spline" else "none",
+        "common_dims": "-".join(str(value) for value in common_dims),
+        "group_dims": "-".join(str(value) for value in group_dims),
+        "property_dims": "-".join(str(value) for value in property_dims),
+        "target_dims": "-".join(str(value) for value in target_dims),
         "featurizer_preset": prepared["feature_preset"],
         "n_features": prepared["x_train"].shape[1],
         "params": params,
@@ -849,9 +1153,10 @@ def run_model(
         "train_seconds": train_seconds,
         "forward_ms_per_batch": forward_ms,
     }
-    for metric_name in METRIC_NAMES:
-        row[f"best_val_{metric_name}"] = best_val_metrics[metric_name]
-        row[f"test_{metric_name}"] = test_metrics[metric_name]
+    for metric_name, value in best_val_metrics.items():
+        row[f"best_val_{metric_name}"] = value
+    for metric_name, value in test_metrics.items():
+        row[f"test_{metric_name}"] = value
     if args.export_formulas and model_label in ("fastkan", "spline"):
         formula_path = (
             Path(args.output_dir)
@@ -864,9 +1169,24 @@ def run_model(
             output_path=formula_path,
             top_k=args.formula_top_k,
             min_abs=args.formula_min_abs,
+            target_name=target_name,
+            task_type=task_type,
+            target_scaler=prepared["target_scaler"],
+            params_before_prune=params,
+            params_after_prune=effective_params,
+            pruned_params=pruned_params,
+            prune_fraction=args.prune_kan_fraction,
+            best_val_metrics=best_val_metrics,
+            test_metrics=test_metrics,
+            fold_metadata=fold_data["metadata"],
         )
         row["formula_path"] = str(formula_path)
-    return row, [float(value) for value in test_prediction.numpy().reshape(-1)]
+    if len(test_prediction) == 0:
+        predictions = []
+    else:
+        prediction_array = test_prediction.numpy().reshape(test_prediction.shape[0], -1)
+        predictions = prediction_array[:, 0].tolist() if prediction_array.shape[1] == 1 else prediction_array.tolist()
+    return row, predictions
 
 
 def prepare_fold(
@@ -906,8 +1226,8 @@ def prepare_fold(
         targets=fold_data["train_targets"],
         task_type=fold_data["metadata"]["task_type"],
     )
-    train_targets = fold_data["train_targets"]
-    test_targets = fold_data["test_targets"]
+    train_targets = as_2d_targets(fold_data["train_targets"])
+    test_targets = as_2d_targets(fold_data["test_targets"])
     processor = MODNetFeatureProcessor(
         n_features=args.n_features,
         scaler=args.scaler,
@@ -915,7 +1235,10 @@ def prepare_fold(
         random_state=args.seed,
         task_type=fold_data["metadata"]["task_type"],
     )
-    processor.fit(train_features.iloc[train_indices], train_targets[train_indices])
+    processor.fit(
+        train_features.iloc[train_indices],
+        feature_selection_target(train_targets[train_indices]),
+    )
 
     x_all_train = processor.transform(train_features)
     x_test = (
@@ -924,13 +1247,13 @@ def prepare_fold(
         else np.empty((0, x_all_train.shape[1]), dtype=np.float32)
     )
     y_train = train_targets[train_indices]
-    y_val = train_targets[val_indices] if len(val_indices) else np.array([], dtype=np.float32)
+    y_val = train_targets[val_indices] if len(val_indices) else np.empty((0, train_targets.shape[1]), dtype=np.float32)
     target_scaler = TargetScaler(y_train, mode=args.target_scale)
     y_all_train_scaled = target_scaler.transform(train_targets)
     y_test_scaled = (
         target_scaler.transform(test_targets)
         if len(test_targets)
-        else np.array([], dtype=np.float32)
+        else np.empty((0, train_targets.shape[1]), dtype=np.float32)
     )
 
     return {
@@ -945,7 +1268,7 @@ def prepare_fold(
         "x_train": x_all_train[train_indices],
         "y_train_scaled": y_all_train_scaled[train_indices],
         "x_val": x_all_train[val_indices] if len(val_indices) else np.empty((0, x_all_train.shape[1]), dtype=np.float32),
-        "y_val_scaled": y_all_train_scaled[val_indices] if len(val_indices) else np.array([], dtype=np.float32),
+        "y_val_scaled": y_all_train_scaled[val_indices] if len(val_indices) else np.empty((0, train_targets.shape[1]), dtype=np.float32),
         "x_test": x_test,
         "y_test_scaled": y_test_scaled,
     }
@@ -981,8 +1304,8 @@ def prepare_precomputed_fold(
         targets=fold_data["train_targets"],
         task_type=fold_data["metadata"]["task_type"],
     )
-    train_targets = np.asarray(fold_data["train_targets"], dtype=np.float32)
-    test_targets = np.asarray(fold_data["test_targets"], dtype=np.float32)
+    train_targets = as_2d_targets(fold_data["train_targets"])
+    test_targets = as_2d_targets(fold_data["test_targets"])
 
     pipeline = make_feature_pipeline(args)
     pipeline.fit(train_features.iloc[train_indices][selected_features])
@@ -990,10 +1313,10 @@ def prepare_precomputed_fold(
     x_test = pipeline.transform(test_features.reindex(columns=selected_features)).astype(np.float32, copy=False)
 
     y_train = train_targets[train_indices]
-    y_val = train_targets[val_indices] if len(val_indices) else np.array([], dtype=np.float32)
+    y_val = train_targets[val_indices] if len(val_indices) else np.empty((0, train_targets.shape[1]), dtype=np.float32)
     target_scaler = TargetScaler(y_train, mode=args.target_scale)
     y_all_train_scaled = target_scaler.transform(train_targets)
-    y_test_scaled = target_scaler.transform(test_targets) if len(test_targets) else np.array([], dtype=np.float32)
+    y_test_scaled = target_scaler.transform(test_targets) if len(test_targets) else np.empty((0, train_targets.shape[1]), dtype=np.float32)
 
     return {
         "feature_preset": "official-modnet-precomputed",
@@ -1007,7 +1330,7 @@ def prepare_precomputed_fold(
         "x_train": x_all_train[train_indices],
         "y_train_scaled": y_all_train_scaled[train_indices],
         "x_val": x_all_train[val_indices] if len(val_indices) else np.empty((0, x_all_train.shape[1]), dtype=np.float32),
-        "y_val_scaled": y_all_train_scaled[val_indices] if len(val_indices) else np.array([], dtype=np.float32),
+        "y_val_scaled": y_all_train_scaled[val_indices] if len(val_indices) else np.empty((0, train_targets.shape[1]), dtype=np.float32),
         "x_test": x_test,
         "y_test_scaled": y_test_scaled,
     }
@@ -1044,8 +1367,17 @@ def summarize_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         for metric_name in METRIC_NAMES:
             for prefix in ("best_val", "test"):
                 key = f"{prefix}_{metric_name}"
-                item[f"{key}_mean"] = finite_mean([float(row[key]) for row in model_rows])
-                item[f"{key}_std"] = finite_std([float(row[key]) for row in model_rows])
+                item[f"{key}_mean"] = finite_mean([float(row.get(key, float("nan"))) for row in model_rows])
+                item[f"{key}_std"] = finite_std([float(row.get(key, float("nan"))) for row in model_rows])
+        dynamic_metric_keys = sorted(
+            key
+            for row in model_rows
+            for key in row
+            if key.startswith(("best_val_", "test_")) and key not in item
+        )
+        for key in dynamic_metric_keys:
+            item[f"{key}_mean"] = finite_mean([float(row.get(key, float("nan"))) for row in model_rows])
+            item[f"{key}_std"] = finite_std([float(row.get(key, float("nan"))) for row in model_rows])
         summary.append(item)
     return summary
 
@@ -1067,36 +1399,235 @@ def export_sparse_formula(
     output_path: Path,
     top_k: int,
     min_abs: float,
+    target_name: str,
+    task_type: str,
+    target_scaler: TargetScaler,
+    params_before_prune: int,
+    params_after_prune: int,
+    pruned_params: int,
+    prune_fraction: float,
+    best_val_metrics: dict[str, float],
+    test_metrics: dict[str, float],
+    fold_metadata: dict[str, Any],
 ) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    n_inputs = len(input_names or []) or int(getattr(model, "n_feat", 0))
+    raw_input_names = input_names or [f"feature_{idx}" for idx in range(n_inputs)]
+    input_vars = [f"x{idx}" for idx in range(n_inputs)]
+    target_names = target_names_from_metadata(fold_metadata)
+    safe_target = _safe_symbol(target_name)
+    safe_target_names = [_safe_symbol(name) for name in target_names]
+    formula_scope = (
+        "exact: every nonzero term after pruning is written"
+        if top_k <= 0
+        else f"readable: top {top_k} nonzero terms per neuron after pruning are written"
+    )
     lines = [
-        f"Sparse formula summary for {model_label}",
-        "The model is kept in layerwise form so the expression stays readable.",
-        "params_after_prune counts nonzero trainable parameters after pruning.",
+        f"Explicit pruned formula for {model_label}",
+        f"target = {target_name}",
+        formula_scope,
+        f"min_abs = {min_abs:g}",
+        f"params_before_prune = {params_before_prune}",
+        f"params_after_prune = {params_after_prune}",
+        f"params_pruned = {pruned_params}",
+        f"requested_prune_fraction = {prune_fraction:g}",
         "",
-        "FastKAN layer form:",
-        "  y_o = sum_i a[o,i] * SiLU(x_i) + b_o",
-        "        + sum_{i,k} c[o,i,k] * exp(-((LN(x)_i - grid_k) / h)^2)",
-        "B-spline KAN layer form:",
-        "  y_o = sum_i a[o,i] * SiLU(x_i) + sum_{i,k} c[o,i,k] * B_{i,k}(x_i)",
-        "",
+        "Performance after pruning",
+        f"  dataset = {fold_metadata.get('dataset', '')}",
+        f"  fold = {fold_metadata.get('fold', '')}",
+        f"  task_type = {task_type}",
+        f"  train_and_val_size = {fold_metadata.get('train_and_val_size', '')}",
+        f"  test_size = {fold_metadata.get('test_size', '')}",
     ]
-    names_by_module: dict[str, list[str] | None] = {"": input_names}
+    lines.extend(_formula_metric_lines("validation", best_val_metrics, task_type, target_names))
+    lines.extend(_formula_metric_lines("test", test_metrics, task_type, target_names))
+    lines.extend(
+        [
+            "  note = metrics are computed from the pruned model represented by this formula.",
+            "  confidence_note = this is held-out performance and formula-fidelity, not calibrated uncertainty.",
+            "",
+        ]
+    )
+    lines.extend(
+        [
+        "Inputs",
+        "  x_i are selected descriptors after the benchmark imputer/scaler.",
+        "  Raw descriptor names:",
+        ]
+    )
+    for idx, name in enumerate(raw_input_names):
+        lines.append(f"    x{idx} = {_safe_symbol(str(name))}")
+    lines.extend(
+        [
+            "",
+            "Function definitions",
+            "  silu(x) = x / (1 + exp(-x))",
+            "  rbf(x; c, h) = exp(-((x - c) / h)^2)",
+            "  LayerNorm_i(v; gamma,beta,eps) = gamma_i * (v_i - mean(v)) / sqrt(var(v) + eps) + beta_i",
+            "  spline_b{i,k}(x) means the kth B-spline basis for input i with the layer knots below.",
+            "",
+            "Equations",
+        ]
+    )
+
+    names_by_module: dict[str, list[str] | None] = {"": input_vars}
+    module_index = 0
+    final_output_names: list[str] = []
+    coverage_values: list[float] = []
     for name, module in model.named_modules():
         if isinstance(module, FastKANLinear):
-            source_names = source_names_for(name, names_by_module, input_names)
-            lines.extend(_fastkan_formula_lines(name, module, source_names, top_k, min_abs))
-            remember_output_names(name, module.out_features, names_by_module)
+            source_names = source_names_for(name, names_by_module, input_vars)
+            output_names = [f"z{module_index:02d}_{idx}" for idx in range(module.out_features)]
+            lines.extend(
+                _fastkan_formula_lines(
+                    name,
+                    module,
+                    source_names,
+                    output_names,
+                    module_index,
+                    top_k,
+                    min_abs,
+                    coverage_values,
+                )
+            )
+            remember_output_names(name, output_names, names_by_module)
+            module_index += 1
         elif isinstance(module, KANLinear):
-            source_names = source_names_for(name, names_by_module, input_names)
-            lines.extend(_spline_formula_lines(name, module, source_names, top_k, min_abs))
-            remember_output_names(name, module.out_features, names_by_module)
+            source_names = source_names_for(name, names_by_module, input_vars)
+            output_names = [f"z{module_index:02d}_{idx}" for idx in range(module.out_features)]
+            lines.extend(
+                _spline_formula_lines(
+                    name,
+                    module,
+                    source_names,
+                    output_names,
+                    top_k,
+                    min_abs,
+                    coverage_values,
+                )
+            )
+            remember_output_names(name, output_names, names_by_module)
+            module_index += 1
         elif isinstance(module, torch.nn.Linear) and name.startswith("output_heads."):
-            source_names = source_names_for(name, names_by_module, input_names)
-            lines.extend(_linear_formula_lines(name, module, source_names, top_k, min_abs))
-            remember_output_names(name, module.out_features, names_by_module)
+            source_names = source_names_for(name, names_by_module, input_vars)
+            raw_name = "logit" if task_type == "classification" else "raw"
+            if module.out_features == 1:
+                output_names = [f"{raw_name}_{safe_target_names[0] if safe_target_names else safe_target}"]
+            else:
+                output_names = [
+                    f"{raw_name}_{safe_target_names[idx] if idx < len(safe_target_names) else f'{safe_target}_{idx}'}"
+                    for idx in range(module.out_features)
+                ]
+            lines.extend(
+                _linear_formula_lines(
+                    name,
+                    module,
+                    source_names,
+                    output_names,
+                    top_k,
+                    min_abs,
+                    coverage_values,
+                )
+            )
+            remember_output_names(name, output_names, names_by_module)
+            final_output_names = output_names
+
+    if final_output_names:
+        lines.extend(
+            _final_prediction_lines(
+                final_output_names,
+                safe_target_names,
+                task_type,
+                target_scaler,
+            )
+        )
+    else:
+        lines.append("  # No output head was found; formula is incomplete.")
+
+    lines.extend(_formula_fidelity_lines(top_k, coverage_values))
 
     output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _formula_metric_lines(
+    prefix: str,
+    metrics: dict[str, float],
+    task_type: str,
+    target_names: list[str] | None = None,
+) -> list[str]:
+    if task_type == "classification":
+        names = ["accuracy", "balanced_accuracy", "f1", "rocauc"]
+    else:
+        names = ["mae", "rmse", "r2"]
+    lines = []
+    for name in names:
+        value = metrics.get(name, float("nan"))
+        if np.isfinite(value):
+            lines.append(f"  {prefix}_{name} = {value:.8g}")
+        else:
+            lines.append(f"  {prefix}_{name} = nan")
+    for target_name in target_names or []:
+        suffix = _target_metric_suffix(target_name)
+        for name in names:
+            key = f"{name}{suffix}"
+            if key not in metrics:
+                continue
+            value = metrics.get(key, float("nan"))
+            label = f"{prefix}_{name}_{_safe_symbol(target_name)}"
+            if np.isfinite(value):
+                lines.append(f"  {label} = {value:.8g}")
+            else:
+                lines.append(f"  {label} = nan")
+    return lines
+
+
+def _formula_fidelity_lines(top_k: int, coverage_values: list[float]) -> list[str]:
+    lines = ["", "Formula fidelity"]
+    if top_k <= 0:
+        lines.append("  exactness = exact_untruncated_after_pruning")
+        lines.append("  term_display = all nonzero terms are shown")
+        return lines
+    finite = [value for value in coverage_values if np.isfinite(value)]
+    if finite:
+        lines.append("  exactness = readable_truncated_after_pruning")
+        lines.append(f"  mean_abs_coefficient_coverage = {float(np.mean(finite)):.8g}")
+        lines.append(f"  min_abs_coefficient_coverage = {float(np.min(finite)):.8g}")
+        lines.append(f"  equations_counted = {len(finite)}")
+    else:
+        lines.append("  exactness = readable_truncated_after_pruning")
+        lines.append("  mean_abs_coefficient_coverage = nan")
+        lines.append("  min_abs_coefficient_coverage = nan")
+    lines.append("  use --formula-top-k 0 to export the exact full formula.")
+    return lines
+
+
+def _final_prediction_lines(
+    raw_names: list[str],
+    safe_target_names: list[str],
+    task_type: str,
+    target_scaler: TargetScaler,
+) -> list[str]:
+    lines = ["", "Final prediction"]
+    if task_type == "classification":
+        for idx, raw_name in enumerate(raw_names):
+            safe_target = safe_target_names[idx] if idx < len(safe_target_names) else f"target_{idx}"
+            lines.append(f"  prob_{safe_target} = sigmoid({raw_name})")
+        return lines
+
+    means = np.asarray(target_scaler.mean).reshape(-1)
+    stds = np.asarray(target_scaler.std).reshape(-1)
+    for idx, raw_name in enumerate(raw_names):
+        safe_target = safe_target_names[idx] if idx < len(safe_target_names) else f"target_{idx}"
+        if target_scaler.mode == "standard":
+            std = float(stds[idx]) if idx < len(stds) else float(stds[0])
+            mean = float(means[idx]) if idx < len(means) else float(means[0])
+            lines.append(
+                f"  pred_{safe_target} = "
+                f"{std:.8g}*{raw_name} + {mean:.8g}"
+            )
+        else:
+            lines.append(f"  pred_{safe_target} = {raw_name}")
+    return lines
 
 
 def parent_name(name: str) -> str:
@@ -1110,9 +1641,12 @@ def source_names_for(
 ) -> list[str] | None:
     if name.startswith("output_heads."):
         prop_key = name.split(".", 1)[1]
+        group_key = prop_key.split("_p", 1)[0]
         return (
             names_by_module.get(f"target_blocks.{prop_key}")
             or names_by_module.get(f"property_blocks.{prop_key}")
+            or names_by_module.get(f"group_blocks.{group_key}")
+            or names_by_module.get("common_block")
             or names_by_module.get(parent_name(name))
         )
     if name.startswith("common_block."):
@@ -1128,30 +1662,31 @@ def source_names_for(
         )
     if name.startswith("target_blocks."):
         prop_key = name.split(".")[1]
+        group_key = prop_key.split("_p", 1)[0]
         return (
             names_by_module.get(parent_name(name))
             or names_by_module.get(f"property_blocks.{prop_key}")
+            or names_by_module.get(f"group_blocks.{group_key}")
         )
     return names_by_module.get(parent_name(name))
 
 
 def remember_output_names(
     name: str,
-    out_features: int,
+    output_names: list[str],
     names_by_module: dict[str, list[str] | None],
 ) -> None:
-    names = [f"{name}.y{idx}" for idx in range(out_features)]
-    names_by_module[name] = names
+    names_by_module[name] = output_names
     parent = parent_name(name)
     if parent:
-        names_by_module[parent] = names
+        names_by_module[parent] = output_names
     for prefix in ("common_block", "group_blocks", "property_blocks", "target_blocks"):
         if name.startswith(prefix + "."):
             parts = name.split(".")
             if prefix == "common_block":
-                names_by_module["common_block"] = names
+                names_by_module["common_block"] = output_names
             elif len(parts) >= 2:
-                names_by_module[".".join(parts[:2])] = names
+                names_by_module[".".join(parts[:2])] = output_names
 
 
 def _source_name(source_names: list[str] | None, index: int) -> str:
@@ -1169,6 +1704,10 @@ def _safe_symbol(value: str) -> str:
         .replace("(", "")
         .replace(")", "")
         .replace(",", "_")
+        .replace("[", "")
+        .replace("]", "")
+        .replace(":", "_")
+        .replace(";", "_")
     )
 
 
@@ -1182,20 +1721,81 @@ def _selected_terms(
     return filtered if top_k <= 0 else filtered[:top_k]
 
 
+def _format_number(value: float) -> str:
+    return f"{value:.6g}"
+
+
 def _format_terms(terms: list[tuple[float, str]]) -> str:
     if not terms:
         return "0"
-    return " + ".join(f"{coef:.6g}*{text}" for coef, text in terms)
+    chunks = []
+    for idx, (coef, text) in enumerate(terms):
+        magnitude = _format_number(abs(coef))
+        if idx == 0:
+            prefix = "- " if coef < 0 else ""
+        else:
+            prefix = " - " if coef < 0 else " + "
+        chunks.append(f"{prefix}{magnitude}*{text}")
+    return "".join(chunks)
+
+
+def _format_vector(values: list[float], top_k: int) -> str:
+    max_items = 0 if top_k <= 0 else 16
+    if max_items <= 0 or len(values) <= max_items:
+        return "[" + ", ".join(_format_number(float(value)) for value in values) + "]"
+    head = values[: max_items // 2]
+    tail = values[-(max_items // 2) :]
+    return (
+        "["
+        + ", ".join(_format_number(float(value)) for value in head)
+        + f", ... ({len(values)} values) ..., "
+        + ", ".join(_format_number(float(value)) for value in tail)
+        + "]"
+    )
+
+
+def _compact_names(names: list[str] | None) -> str:
+    if not names:
+        return "[]"
+    if len(names) <= 12:
+        return "[" + ", ".join(names) + "]"
+    head = ", ".join(names[:6])
+    tail = ", ".join(names[-3:])
+    return f"[{head}, ... ({len(names)} values) ..., {tail}]"
+
+
+def _append_truncation_note(
+    lines: list[str],
+    selected: list[tuple[float, str]],
+    all_terms: list[tuple[float, str]],
+    top_k: int,
+    min_abs: float,
+    coverage_values: list[float],
+) -> None:
+    all_nonzero = _selected_terms(all_terms, 0, min_abs)
+    total_abs = sum(abs(coef) for coef, _ in all_nonzero)
+    selected_abs = sum(abs(coef) for coef, _ in selected)
+    coverage = 1.0 if total_abs <= 0 else min(1.0, selected_abs / total_abs)
+    coverage_values.append(float(coverage))
+    total = len(all_nonzero)
+    if total > len(selected):
+        lines.append(
+            f"    # shown {len(selected)} of {total} nonzero terms; "
+            f"abs_coef_coverage={coverage:.4f}"
+        )
 
 
 def _fastkan_formula_lines(
     name: str,
     module: FastKANLinear,
     source_names: list[str] | None,
+    output_names: list[str],
+    module_index: int,
     top_k: int,
     min_abs: float,
+    coverage_values: list[float],
 ) -> list[str]:
-    lines = [f"[{name}] FastKANLinear({module.in_features}->{module.out_features})"]
+    lines = [f"  # {name}: FastKANLinear({module.in_features}->{module.out_features})"]
     grid = [float(value) for value in module.rbf.grid.detach().cpu().tolist()]
     denominator = float(module.rbf.denominator)
     spline_weight = module.spline_linear.weight.detach().cpu()
@@ -1206,26 +1806,37 @@ def _fastkan_formula_lines(
         nonzero += int(torch.count_nonzero(base_weight).item())
     if base_bias is not None:
         nonzero += int(torch.count_nonzero(base_bias).item())
-    lines.append(f"  nonzero_terms={nonzero}, grid={grid}, h={denominator:.6g}")
-    for out_idx in range(module.out_features):
+    lines.append(f"  # nonzero_terms={nonzero}, grid={grid}, h={denominator:.6g}")
+
+    ln_prefix = None
+    if module.layernorm is not None:
+        ln_prefix = f"ln{module_index:02d}"
+        gamma = [float(value) for value in module.layernorm.weight.detach().cpu().tolist()]
+        beta = [float(value) for value in module.layernorm.bias.detach().cpu().tolist()]
+        lines.append(
+            f"  # {ln_prefix}_i = LayerNorm_i({_compact_names(source_names)}, "
+            f"gamma={_format_vector(gamma, top_k)}, beta={_format_vector(beta, top_k)}, "
+            f"eps={module.layernorm.eps:g})"
+        )
+
+    for out_idx, output_name in enumerate(output_names):
         terms: list[tuple[float, str]] = []
         if base_weight is not None:
             for in_idx in range(module.in_features):
                 coef = float(base_weight[out_idx, in_idx])
-                terms.append((coef, f"SiLU({_source_name(source_names, in_idx)})"))
+                terms.append((coef, f"silu({_source_name(source_names, in_idx)})"))
             if base_bias is not None:
-                bias = float(base_bias[out_idx])
-                if abs(bias) > min_abs:
-                    terms.append((bias, "1"))
+                terms.append((float(base_bias[out_idx]), "1"))
         for in_idx in range(module.in_features):
+            source = _source_name(source_names, in_idx)
+            spline_source = f"{ln_prefix}_{in_idx}" if ln_prefix is not None else source
             for grid_idx, center in enumerate(grid):
                 flat_idx = in_idx * len(grid) + grid_idx
                 coef = float(spline_weight[out_idx, flat_idx])
-                source = _source_name(source_names, in_idx)
-                spline_source = f"LN({source})" if module.layernorm is not None else source
-                terms.append((coef, f"RBF({spline_source}, center={center:.6g}, h={denominator:.6g})"))
+                terms.append((coef, f"rbf({spline_source}; c={center:.6g}, h={denominator:.6g})"))
         selected = _selected_terms(terms, top_k, min_abs)
-        lines.append(f"  y{out_idx} = {_format_terms(selected)}")
+        lines.append(f"  {output_name} = {_format_terms(selected)}")
+        _append_truncation_note(lines, selected, terms, top_k, min_abs, coverage_values)
     lines.append("")
     return lines
 
@@ -1234,27 +1845,30 @@ def _spline_formula_lines(
     name: str,
     module: KANLinear,
     source_names: list[str] | None,
+    output_names: list[str],
     top_k: int,
     min_abs: float,
+    coverage_values: list[float],
 ) -> list[str]:
-    lines = [f"[{name}] KANLinear({module.in_features}->{module.out_features})"]
+    lines = [f"  # {name}: KANLinear({module.in_features}->{module.out_features})"]
     base_weight = module.base_weight.detach().cpu()
     spline_weight = module.scaled_spline_weight.detach().cpu()
     knots = [float(value) for value in module.grid[0].detach().cpu().tolist()]
     nonzero = int(torch.count_nonzero(base_weight).item() + torch.count_nonzero(spline_weight).item())
     lines.append(
-        f"  nonzero_terms={nonzero}, spline_order={module.spline_order}, knots={knots}"
+        f"  # nonzero_terms={nonzero}, spline_order={module.spline_order}, knots={knots}"
     )
-    for out_idx in range(module.out_features):
+    for out_idx, output_name in enumerate(output_names):
         terms: list[tuple[float, str]] = []
         for in_idx in range(module.in_features):
             source = _source_name(source_names, in_idx)
-            terms.append((float(base_weight[out_idx, in_idx]), f"SiLU({source})"))
+            terms.append((float(base_weight[out_idx, in_idx]), f"silu({source})"))
             for basis_idx in range(spline_weight.shape[-1]):
                 coef = float(spline_weight[out_idx, in_idx, basis_idx])
-                terms.append((coef, f"B{basis_idx}({source})"))
+                terms.append((coef, f"spline_b{in_idx}_{basis_idx}({source})"))
         selected = _selected_terms(terms, top_k, min_abs)
-        lines.append(f"  y{out_idx} = {_format_terms(selected)}")
+        lines.append(f"  {output_name} = {_format_terms(selected)}")
+        _append_truncation_note(lines, selected, terms, top_k, min_abs, coverage_values)
     lines.append("")
     return lines
 
@@ -1263,17 +1877,19 @@ def _linear_formula_lines(
     name: str,
     module: torch.nn.Linear,
     source_names: list[str] | None,
+    output_names: list[str],
     top_k: int,
     min_abs: float,
+    coverage_values: list[float],
 ) -> list[str]:
-    lines = [f"[{name}] Linear({module.in_features}->{module.out_features})"]
+    lines = [f"  # {name}: Linear({module.in_features}->{module.out_features})"]
     weight = module.weight.detach().cpu()
     bias = module.bias.detach().cpu() if module.bias is not None else None
     nonzero = int(torch.count_nonzero(weight).item())
     if bias is not None:
         nonzero += int(torch.count_nonzero(bias).item())
-    lines.append(f"  nonzero_terms={nonzero}")
-    for out_idx in range(module.out_features):
+    lines.append(f"  # nonzero_terms={nonzero}")
+    for out_idx, output_name in enumerate(output_names):
         terms = [
             (float(weight[out_idx, in_idx]), _source_name(source_names, in_idx))
             for in_idx in range(module.in_features)
@@ -1281,7 +1897,8 @@ def _linear_formula_lines(
         if bias is not None:
             terms.append((float(bias[out_idx]), "1"))
         selected = _selected_terms(terms, top_k, min_abs)
-        lines.append(f"  y{out_idx} = {_format_terms(selected)}")
+        lines.append(f"  {output_name} = {_format_terms(selected)}")
+        _append_truncation_note(lines, selected, terms, top_k, min_abs, coverage_values)
     lines.append("")
     return lines
 
@@ -1289,7 +1906,7 @@ def _linear_formula_lines(
 def write_matbench_records(
     args: argparse.Namespace,
     rows: list[dict[str, Any]],
-    predictions_by_model: dict[str, dict[int, list[float]]],
+    predictions_by_model: dict[str, dict[int, list[Any]]],
     output_dir: Path,
 ) -> dict[str, Any]:
     if (
@@ -1302,6 +1919,9 @@ def write_matbench_records(
 
     from matbench.task import MatbenchTask
     from monty.json import MontyEncoder
+
+    if args.dataset == "matbench_elastic":
+        return write_elastic_matbench_records(args, rows, predictions_by_model, output_dir)
 
     records = {}
     for model_name, fold_predictions in predictions_by_model.items():
@@ -1337,6 +1957,58 @@ def write_matbench_records(
     return records
 
 
+def write_elastic_matbench_records(
+    args: argparse.Namespace,
+    rows: list[dict[str, Any]],
+    predictions_by_model: dict[str, dict[int, list[Any]]],
+    output_dir: Path,
+) -> dict[str, Any]:
+    from matbench.task import MatbenchTask
+    from monty.json import MontyEncoder
+
+    source_tasks = ["matbench_log_gvrh", "matbench_log_kvrh"]
+    records = {}
+    for model_name, fold_predictions in predictions_by_model.items():
+        model_records = {}
+        for target_idx, task_name in enumerate(source_tasks):
+            task = MatbenchTask(task_name, autoload=False)
+            task.load()
+            for fold, predictions in sorted(fold_predictions.items()):
+                pred_array = np.asarray(predictions, dtype=float)
+                if pred_array.ndim == 1:
+                    if len(source_tasks) > 1:
+                        raise ValueError("Elastic predictions must be 2D with one column per target")
+                    target_predictions = pred_array.tolist()
+                else:
+                    target_predictions = pred_array[:, target_idx].tolist()
+                row = next(
+                    item
+                    for item in rows
+                    if str(item["model"]) == model_name and int(item["fold"]) == int(fold)
+                )
+                task.record(
+                    fold,
+                    target_predictions,
+                    params={
+                        key: _json_scalar(value)
+                        for key, value in row.items()
+                        if not key.startswith("test_") and not key.startswith("best_val_")
+                    },
+                )
+
+            record_path = output_dir / f"matbench-record-{task_name}-{model_name}.json"
+            record_path.write_text(
+                json.dumps(task.as_dict(), indent=2, cls=MontyEncoder),
+                encoding="utf-8",
+            )
+            model_records[task_name] = {
+                "record_path": str(record_path),
+                "scores": _serialize_matbench_scores(task),
+            }
+        records[model_name] = model_records
+    return records
+
+
 def _serialize_matbench_scores(task) -> Any:
     try:
         scores = task.scores
@@ -1348,6 +2020,8 @@ def _serialize_matbench_scores(task) -> Any:
 
 
 def _json_scalar(value: Any) -> Any:
+    if isinstance(value, np.ndarray):
+        return value.tolist()
     if isinstance(value, np.generic):
         return value.item()
     if isinstance(value, float) and np.isnan(value):
@@ -1371,7 +2045,7 @@ def print_table(rows: Iterable[dict[str, Any]]) -> None:
     if task_type == "classification":
         headers.extend(["best_val_rocauc", "test_rocauc", "test_accuracy", "test_f1"])
     else:
-        headers.extend(["best_val_mae", "best_val_rmse", "test_mae", "test_rmse"])
+        headers.extend(["best_val_mae", "best_val_rmse", "best_val_r2", "test_mae", "test_rmse", "test_r2"])
     headers.extend(
         [
         "train_seconds",
@@ -1397,6 +2071,9 @@ def ordered_fieldnames(rows: list[dict[str, Any]]) -> list[str]:
     preferred = [
         "fold",
         "task_type",
+        "target",
+        "target_names",
+        "n_targets",
         "model",
         "block_type",
         "kan_impl",
@@ -1413,18 +2090,24 @@ def ordered_fieldnames(rows: list[dict[str, Any]]) -> list[str]:
         "n_features",
         "kan_grid_size",
         "kan_spline_order",
+        "common_dims",
+        "group_dims",
+        "property_dims",
+        "target_dims",
         "lr",
         "weight_decay",
         "loss",
         "best_epoch",
         "best_val_mae",
         "best_val_rmse",
+        "best_val_r2",
         "best_val_rocauc",
         "best_val_accuracy",
         "best_val_balanced_accuracy",
         "best_val_f1",
         "test_mae",
         "test_rmse",
+        "test_r2",
         "test_rocauc",
         "test_accuracy",
         "test_balanced_accuracy",

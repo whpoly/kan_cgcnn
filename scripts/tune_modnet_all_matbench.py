@@ -22,10 +22,12 @@ FEATURE_PRESETS = [
     "matminer-structure-lite",
 ]
 MAXIMIZE_METRICS = {
+    "best_val_r2",
     "best_val_accuracy",
     "best_val_balanced_accuracy",
     "best_val_f1",
     "best_val_rocauc",
+    "test_r2",
     "test_accuracy",
     "test_balanced_accuracy",
     "test_f1",
@@ -62,12 +64,14 @@ def parse_args() -> argparse.Namespace:
             "auto",
             "best_val_mae",
             "best_val_rmse",
+            "best_val_r2",
             "best_val_accuracy",
             "best_val_balanced_accuracy",
             "best_val_f1",
             "best_val_rocauc",
             "test_mae",
             "test_rmse",
+            "test_r2",
             "test_accuracy",
             "test_balanced_accuracy",
             "test_f1",
@@ -81,6 +85,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--common-dim-candidates", type=int, nargs="+", default=None)
     parser.add_argument("--group-dim-candidates", type=int, nargs="+", default=None)
     parser.add_argument("--property-dim-candidates", type=int, nargs="+", default=None)
+    parser.add_argument("--target-dim-candidates", type=int, nargs="+", default=None)
     parser.add_argument("--kan-grid-size-candidates", type=int, nargs="+", default=None)
     parser.add_argument("--kan-spline-order-candidates", type=int, nargs="+", default=None)
     parser.add_argument("--lr-candidates", type=float, nargs="+", default=None)
@@ -137,10 +142,29 @@ def is_supported(meta: Any, args: argparse.Namespace | None = None) -> bool:
 
 
 def supported_datasets(metadata: dict[str, Any], args: argparse.Namespace | None = None) -> list[str]:
-    return [name for name, meta in metadata.items() if is_supported(meta, args)]
+    datasets = [name for name, meta in metadata.items() if is_supported(meta, args)]
+    if "matbench_log_gvrh" in datasets and "matbench_log_kvrh" in datasets:
+        datasets = [
+            name
+            for name in datasets
+            if name not in {"matbench_log_gvrh", "matbench_log_kvrh"}
+        ]
+        datasets.append("matbench_elastic")
+    return sorted(datasets)
 
 
 def metadata_row(dataset: str, meta: Any) -> dict[str, Any]:
+    if dataset == "matbench_elastic":
+        return {
+            "dataset": dataset,
+            "task_type": "regression",
+            "input_type": "structure",
+            "target": "log10(G_VRH)+log10(K_VRH)",
+            "unit": None,
+            "n_samples": int(meta.n_samples),
+            "mad": None,
+            "frac_true": None,
+        }
     return {
         "dataset": dataset,
         "task_type": meta.task_type,
@@ -153,14 +177,24 @@ def metadata_row(dataset: str, meta: Any) -> dict[str, Any]:
     }
 
 
+def metadata_for_dataset(dataset: str, metadata: dict[str, Any]) -> Any:
+    if dataset == "matbench_elastic":
+        return metadata["matbench_log_gvrh"]
+    return metadata[dataset]
+
+
 def select_datasets(args: argparse.Namespace, metadata: dict[str, Any]) -> tuple[list[str], list[str]]:
     all_supported = supported_datasets(metadata, args)
     requested = args.datasets or all_supported
-    unknown = [dataset for dataset in requested if dataset not in metadata]
+    unknown = [dataset for dataset in requested if dataset not in metadata and dataset != "matbench_elastic"]
     if unknown:
         raise ValueError(f"Unknown Matbench dataset(s): {', '.join(unknown)}")
 
-    unsupported = [dataset for dataset in requested if not is_supported(metadata[dataset], args)]
+    unsupported = [
+        dataset
+        for dataset in requested
+        if dataset != "matbench_elastic" and not is_supported(metadata[dataset], args)
+    ]
     if unsupported:
         raise ValueError(
             "Unsupported by this small Matbench MODNet runner: "
@@ -226,6 +260,7 @@ def build_tune_command(args: argparse.Namespace, dataset: str, output_dir: Path)
     extend_optional_values(cmd, "--common-dim-candidates", args.common_dim_candidates)
     extend_optional_values(cmd, "--group-dim-candidates", args.group_dim_candidates)
     extend_optional_values(cmd, "--property-dim-candidates", args.property_dim_candidates)
+    extend_optional_values(cmd, "--target-dim-candidates", args.target_dim_candidates)
     extend_optional_values(cmd, "--kan-grid-size-candidates", args.kan_grid_size_candidates)
     extend_optional_values(cmd, "--kan-spline-order-candidates", args.kan_spline_order_candidates)
     extend_optional_values(cmd, "--lr-candidates", args.lr_candidates)
@@ -403,6 +438,7 @@ def print_dataset_summary(
             "model",
             "mae",
             "rmse",
+            "r2",
             "val_mae",
             "params_before",
             "params_after",
@@ -439,6 +475,7 @@ def print_dataset_summary(
                 {
                     "mae": format_metric(row.get("test_mae_mean"), row.get("test_mae_std")),
                     "rmse": format_metric(row.get("test_rmse_mean"), row.get("test_rmse_std")),
+                    "r2": format_metric(row.get("test_r2_mean"), row.get("test_r2_std")),
                     "val_mae": format_metric(row.get("best_val_mae_mean"), row.get("best_val_mae_std")),
                 }
             )
@@ -499,9 +536,8 @@ def write_outputs(
     payload = {
         "args": vars(args),
         "supported_datasets": [
-            metadata_row(dataset, meta)
-            for dataset, meta in metadata.items()
-            if is_supported(meta, args)
+            metadata_row(dataset, metadata_for_dataset(dataset, metadata))
+            for dataset in supported_datasets(metadata, args)
         ],
         "aggregate_rows": aggregate_rows,
         "failures": failures,
@@ -546,6 +582,8 @@ def ordered_fieldnames(rows: list[dict[str, Any]]) -> list[str]:
         "test_mae_std",
         "test_rmse_mean",
         "test_rmse_std",
+        "test_r2_mean",
+        "test_r2_std",
         "test_rocauc_mean",
         "test_rocauc_std",
         "test_accuracy_mean",
@@ -558,6 +596,8 @@ def ordered_fieldnames(rows: list[dict[str, Any]]) -> list[str]:
         "best_val_mae_std",
         "best_val_rmse_mean",
         "best_val_rmse_std",
+        "best_val_r2_mean",
+        "best_val_r2_std",
         "best_val_rocauc_mean",
         "best_val_rocauc_std",
         "best_val_accuracy_mean",
@@ -570,6 +610,7 @@ def ordered_fieldnames(rows: list[dict[str, Any]]) -> list[str]:
         "common_dim",
         "group_dim",
         "property_dim",
+        "target_dim",
         "kan_grid_size",
         "kan_spline_order",
         "lr",
@@ -594,7 +635,7 @@ def main() -> None:
     metadata = matbench_metadata()
     if args.list_datasets:
         for dataset in supported_datasets(metadata, args):
-            row = metadata_row(dataset, metadata[dataset])
+            row = metadata_row(dataset, metadata_for_dataset(dataset, metadata))
             unit = row["unit"] if row["unit"] not in (None, "None") else ""
             frac_true = (
                 f", frac_true={row['frac_true']:.3g}"
@@ -631,7 +672,7 @@ def main() -> None:
     failures: list[dict[str, Any]] = []
     for index, dataset in enumerate(datasets, start=1):
         dataset_dir = output_root / dataset
-        dataset_meta = metadata_row(dataset, metadata[dataset])
+        dataset_meta = metadata_row(dataset, metadata_for_dataset(dataset, metadata))
         print(f"\n=== Dataset {index}/{len(datasets)}: {dataset} ===", flush=True)
         cmd = build_tune_command(args, dataset, dataset_dir)
         print(subprocess.list2cmdline(cmd), flush=True)

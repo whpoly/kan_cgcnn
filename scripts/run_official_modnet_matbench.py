@@ -24,12 +24,11 @@ from sklearn.metrics import (
 
 MATBENCH_TASKS = [
     "matbench_dielectric",
+    "matbench_elastic",
     "matbench_expt_gap",
     "matbench_expt_is_metal",
     "matbench_glass",
     "matbench_jdft2d",
-    "matbench_log_gvrh",
-    "matbench_log_kvrh",
     "matbench_mp_e_form",
     "matbench_mp_gap",
     "matbench_mp_is_metal",
@@ -39,12 +38,11 @@ MATBENCH_TASKS = [
 ]
 SMALL_MATBENCH_TASKS = [
     "matbench_dielectric",
+    "matbench_elastic",
     "matbench_expt_gap",
     "matbench_expt_is_metal",
     "matbench_glass",
     "matbench_jdft2d",
-    "matbench_log_gvrh",
-    "matbench_log_kvrh",
     "matbench_perovskites",
     "matbench_phonons",
     "matbench_steels",
@@ -54,6 +52,8 @@ CLASSIFICATION_TASKS = {
     "matbench_glass",
     "matbench_mp_is_metal",
 }
+ELASTIC_MULTITASK_TASK = "matbench_elastic"
+ELASTIC_TARGET_TASKS = ("matbench_log_gvrh", "matbench_log_kvrh")
 OFFICIAL_FIT_SETTINGS = {
     "increase_bs": False,
     "lr": 0.005,
@@ -167,11 +167,12 @@ def load_or_featurize(
             "task": task,
             "target_names": list(targets.columns),
             "classification": task in CLASSIFICATION_TASKS,
+            "source_tasks": list(ELASTIC_TARGET_TASKS) if task == ELASTIC_MULTITASK_TASK else [task],
             "cache_path": str(cache_path),
             "loaded_from_cache": True,
         }
 
-    df = sanitize_columns(load_dataset(task))
+    df = load_elastic_multitask_dataframe() if task == ELASTIC_MULTITASK_TASK else sanitize_columns(load_dataset(task))
     target_names = [
         column for column in df.columns if column not in ("id", "structure", "composition")
     ]
@@ -206,9 +207,33 @@ def load_or_featurize(
         "target_names": target_names,
         "classification": classification,
         "input_type": input_type,
+        "source_tasks": list(ELASTIC_TARGET_TASKS) if task == ELASTIC_MULTITASK_TASK else [task],
         "cache_path": str(cache_path),
         "loaded_from_cache": False,
     }
+
+
+def load_elastic_multitask_dataframe() -> Any:
+    import pandas as pd
+    from matminer.datasets import load_dataset
+
+    frames = [sanitize_columns(load_dataset(task)) for task in ELASTIC_TARGET_TASKS]
+    base = frames[0].copy()
+    for frame in frames[1:]:
+        if len(frame) != len(base):
+            raise RuntimeError("Elastic Matbench task sizes differ; cannot form multitask target")
+        if "structure" in base.columns and "structure" in frame.columns:
+            formulas_a = [structure.composition.reduced_formula for structure in base["structure"]]
+            formulas_b = [structure.composition.reduced_formula for structure in frame["structure"]]
+            if formulas_a != formulas_b:
+                raise RuntimeError("Elastic Matbench structures are not aligned")
+        target_columns = [
+            column for column in frame.columns if column not in ("id", "structure", "composition")
+        ]
+        if len(target_columns) != 1:
+            raise RuntimeError(f"Expected one target column in elastic source task, got {target_columns}")
+        base[target_columns[0]] = frame[target_columns[0]].to_numpy()
+    return pd.DataFrame(base)
 
 
 def run_official_benchmark(
@@ -258,9 +283,9 @@ def fold_metrics(
     targets: pd.DataFrame,
     classification: bool,
 ) -> dict[str, float]:
-    target_name = str(targets.columns[0])
-    y_true = targets[target_name].to_numpy()
     if classification:
+        target_name = str(targets.columns[0])
+        y_true = targets[target_name].to_numpy()
         y_prob = class_one_probability(predictions, target_name)
         y_pred = (y_prob >= 0.5).astype(int)
         return {
@@ -269,15 +294,32 @@ def fold_metrics(
             "ap_score": float(average_precision_score(y_true.astype(int), y_prob)),
         }
 
-    if target_name in predictions.columns:
-        y_pred = predictions[target_name].to_numpy(dtype=float)
-    else:
-        y_pred = predictions.iloc[:, 0].to_numpy(dtype=float)
-    return {
-        "mae": float(mean_absolute_error(y_true, y_pred)),
-        "rmse": float(mean_squared_error(y_true, y_pred, squared=False)),
-        "max_error": float(max_error(y_true, y_pred)),
-    }
+    metrics = {}
+    maes = []
+    rmses = []
+    max_errors = []
+    for target_idx, target_name in enumerate(targets.columns):
+        safe_target = str(target_name).replace(" ", "_").replace("(", "").replace(")", "")
+        y_true = targets[target_name].to_numpy()
+        if target_name in predictions.columns:
+            y_pred = predictions[target_name].to_numpy(dtype=float)
+        elif target_idx < predictions.shape[1]:
+            y_pred = predictions.iloc[:, target_idx].to_numpy(dtype=float)
+        else:
+            y_pred = predictions.iloc[:, 0].to_numpy(dtype=float)
+        mae = float(mean_absolute_error(y_true, y_pred))
+        rmse = float(mean_squared_error(y_true, y_pred, squared=False))
+        err = float(max_error(y_true, y_pred))
+        maes.append(mae)
+        rmses.append(rmse)
+        max_errors.append(err)
+        metrics[f"mae__{safe_target}"] = mae
+        metrics[f"rmse__{safe_target}"] = rmse
+        metrics[f"max_error__{safe_target}"] = err
+    metrics["mae"] = float(np.mean(maes))
+    metrics["rmse"] = float(np.mean(rmses))
+    metrics["max_error"] = float(np.mean(max_errors))
+    return metrics
 
 
 def summarize_results(
@@ -306,7 +348,9 @@ def summarize_results(
             row["best_preset"] = json.dumps(results["best_presets"][fold], sort_keys=True)
         fold_rows.append(row)
 
-    metric_names = ["rocauc", "accuracy", "ap_score"] if classification else ["mae", "rmse", "max_error"]
+    metric_names = ["rocauc", "accuracy", "ap_score"] if classification else sorted(
+        key for row in fold_rows for key in row if key.startswith(("mae", "rmse", "max_error"))
+    )
     summary: dict[str, Any] = {
         "task": task,
         "task_type": "classification" if classification else "regression",
