@@ -1,6 +1,6 @@
 param(
     [ValidateSet("small", "all")]
-    [string]$TaskSet = "all",
+    [string]$TaskSet = "small",
     [string[]]$Tasks = @(),
     [string]$OfficialEnv = "modnet-v012-matbench",
     [string]$KanEnv = "kan-cgcnn-cuda",
@@ -38,7 +38,6 @@ $ErrorActionPreference = "Stop"
 $allTasks = @(
     "matbench_dielectric",
     "matbench_expt_gap",
-    "matbench_expt_is_metal",
     "matbench_glass",
     "matbench_jdft2d",
     "matbench_elastic",
@@ -53,7 +52,6 @@ $allTasks = @(
 $smallTasks = @(
     "matbench_dielectric",
     "matbench_expt_gap",
-    "matbench_expt_is_metal",
     "matbench_glass",
     "matbench_jdft2d",
     "matbench_elastic",
@@ -131,8 +129,11 @@ if (-not $SkipOfficial) {
     $officialArgs += $Tasks
     $officialArgs += @(
         "--n-jobs", "$NJobs",
+        "--hp-strategy", "fit_preset",
+        "--random-state", "7",
         "--nested-folds", "$NestedFolds",
         "--n-models", "$NModels",
+        "--skip-existing",
         "--export-feature-folds",
         "--export-max-features", "$ExportMaxFeatures",
         "--output-dir", $OfficialOutputDir

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import gzip
+import inspect
 import json
 import os
 import pickle
@@ -26,7 +27,6 @@ MATBENCH_TASKS = [
     "matbench_dielectric",
     "matbench_elastic",
     "matbench_expt_gap",
-    "matbench_expt_is_metal",
     "matbench_glass",
     "matbench_jdft2d",
     "matbench_mp_e_form",
@@ -40,7 +40,6 @@ SMALL_MATBENCH_TASKS = [
     "matbench_dielectric",
     "matbench_elastic",
     "matbench_expt_gap",
-    "matbench_expt_is_metal",
     "matbench_glass",
     "matbench_jdft2d",
     "matbench_perovskites",
@@ -81,9 +80,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fast", action="store_true", help="Official MODNet debug mode.")
     parser.add_argument("--nested-folds", type=int, default=5)
     parser.add_argument("--n-models", type=int, default=5)
+    parser.add_argument("--hp-strategy", choices=["fit_preset", "ga"], default="fit_preset")
+    parser.add_argument("--no-hp-optimization", action="store_true")
+    parser.add_argument("--no-inner-feat-selection", action="store_true")
+    parser.add_argument("--no-use-precomputed-cross-nmi", action="store_true")
+    parser.add_argument("--random-state", type=int, default=None)
     parser.add_argument("--force-featurize", action="store_true")
+    parser.add_argument(
+        "--skip-existing",
+        action="store_true",
+        help="Skip tasks whose requested official outputs already exist.",
+    )
     parser.add_argument("--skip-benchmark", action="store_true")
     parser.add_argument("--save-final-model", action="store_true")
+    parser.add_argument("--save-folds", action="store_true")
     parser.add_argument("--export-feature-folds", action="store_true")
     parser.add_argument(
         "--export-max-features",
@@ -109,12 +119,16 @@ def require_official_modnet() -> None:
 
 
 def setup_threading() -> None:
-    os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
-    os.environ.setdefault("MKL_NUM_THREADS", "1")
-    os.environ.setdefault("OMP_NUM_THREADS", "1")
-    os.environ.setdefault("TF_NUM_INTRAOP_THREADS", "1")
-    os.environ.setdefault("TF_NUM_INTEROP_THREADS", "1")
-    os.environ.setdefault("CUDA_VISIBLE_DEVICES", "-1")
+    for name in (
+        "OPENBLAS_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "OMP_NUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+        "TF_NUM_INTRAOP_THREADS",
+        "TF_NUM_INTEROP_THREADS",
+    ):
+        os.environ[name] = "1"
+    os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 
 
 def normalize_task(task: str) -> str:
@@ -128,6 +142,24 @@ def selected_tasks(args: argparse.Namespace) -> list[str]:
     if args.tasks:
         return [normalize_task(task) for task in args.tasks]
     return list(MATBENCH_TASKS if args.task_set == "all" else SMALL_MATBENCH_TASKS)
+
+
+def task_outputs_complete(output_dir: Path, task: str, require_feature_folds: bool) -> bool:
+    task_dir = output_dir / task
+    if not (task_dir / "official-modnet-run-metadata.json").exists():
+        return False
+    if not require_feature_folds:
+        return True
+    feature_dir = task_dir / "official_feature_folds"
+    for fold in range(5):
+        fold_dir = feature_dir / f"fold_{fold}"
+        if not (
+            (fold_dir / "train_features.csv.gz").exists()
+            and (fold_dir / "test_features.csv.gz").exists()
+            and (fold_dir / "feature_order.json").exists()
+        ):
+            return False
+    return True
 
 
 def sanitize_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -239,10 +271,7 @@ def load_elastic_multitask_dataframe() -> Any:
 def run_official_benchmark(
     data: Any,
     classification: bool,
-    n_jobs: int,
-    fast: bool,
-    nested_folds: int,
-    n_models: int,
+    args: argparse.Namespace,
 ) -> dict[str, Any]:
     from modnet.matbench.benchmark import matbench_benchmark
     from modnet.models import EnsembleMODNetModel
@@ -250,17 +279,28 @@ def run_official_benchmark(
     target_names = list(data.df_targets.columns)
     names = [[target_names]]
     weights = {name: 1 for name in target_names}
+    kwargs = {
+        "model_type": EnsembleMODNetModel,
+        "n_models": args.n_models,
+        "classification": classification,
+        "fast": args.fast,
+        "nested": 0 if args.fast else args.nested_folds,
+        "n_jobs": args.n_jobs,
+        "save_folds": args.save_folds,
+        "save_models": args.save_final_model,
+        "hp_optimization": not args.no_hp_optimization,
+        "hp_strategy": args.hp_strategy,
+        "inner_feat_selection": not args.no_inner_feat_selection,
+        "use_precomputed_cross_nmi": not args.no_use_precomputed_cross_nmi,
+    }
+    if "random_state" in inspect.signature(matbench_benchmark).parameters:
+        kwargs["random_state"] = args.random_state
     return matbench_benchmark(
         data,
         names,
         weights,
         dict(OFFICIAL_FIT_SETTINGS),
-        model_type=EnsembleMODNetModel,
-        n_models=n_models,
-        classification=classification,
-        fast=fast,
-        nested=0 if fast else nested_folds,
-        n_jobs=n_jobs,
+        **kwargs,
     )
 
 
@@ -400,6 +440,8 @@ def export_feature_folds(
     classification: bool,
     max_features: int,
     n_jobs: int,
+    inner_feat_selection: bool,
+    use_precomputed_cross_nmi: bool,
 ) -> Path:
     from modnet.matbench.benchmark import matbench_kfold_splits
     from modnet.preprocessing import MODData
@@ -413,16 +455,18 @@ def export_feature_folds(
         saved_train = task_dir / "folds" / f"train_moddata_f{fold + 1}"
         if saved_train.exists():
             train_data = MODData.load(saved_train)
-        else:
+        elif inner_feat_selection:
             train_data.feature_selection(
                 n=-1,
-                use_precomputed_cross_nmi=True,
+                use_precomputed_cross_nmi=use_precomputed_cross_nmi,
                 n_jobs=n_jobs,
             )
             saved_train.parent.mkdir(parents=True, exist_ok=True)
             train_data.save(saved_train)
 
-        feature_order = list(train_data.optimal_features)
+        feature_order = list(
+            getattr(train_data, "optimal_features", None) or train_data.df_featurized.columns
+        )
         limit = len(feature_order) if max_features <= 0 else min(max_features, len(feature_order))
         selected = feature_order[:limit]
         fold_dir = export_dir / f"fold_{fold}"
@@ -471,6 +515,20 @@ def run_task(args: argparse.Namespace, task: str, output_dir: Path) -> dict[str,
     )
     metadata["modnet_version_target"] = "0.1.12"
     metadata["official_fit_settings"] = OFFICIAL_FIT_SETTINGS
+    metadata["official_matbench_settings"] = {
+        "target_hierarchy": [[list(data.df_targets.columns)]],
+        "target_weights": {name: 1 for name in data.df_targets.columns},
+        "model_type": "EnsembleMODNetModel",
+        "n_models": args.n_models,
+        "hp_optimization": not args.no_hp_optimization,
+        "hp_strategy": args.hp_strategy,
+        "inner_feat_selection": not args.no_inner_feat_selection,
+        "use_precomputed_cross_nmi": not args.no_use_precomputed_cross_nmi,
+        "nested": 0 if args.fast else args.nested_folds,
+        "save_folds": args.save_folds,
+        "save_models": args.save_final_model,
+        "random_state": args.random_state,
+    }
 
     old_cwd = Path.cwd()
     results: dict[str, Any] | None = None
@@ -480,10 +538,7 @@ def run_task(args: argparse.Namespace, task: str, output_dir: Path) -> dict[str,
             results = run_official_benchmark(
                 data,
                 classification=bool(metadata["classification"]),
-                n_jobs=args.n_jobs,
-                fast=args.fast,
-                nested_folds=args.nested_folds,
-                n_models=args.n_models,
+                args=args,
             )
             fold_rows, summary = summarize_results(
                 task,
@@ -525,6 +580,8 @@ def run_task(args: argparse.Namespace, task: str, output_dir: Path) -> dict[str,
                 classification=bool(metadata["classification"]),
                 max_features=args.export_max_features,
                 n_jobs=args.n_jobs,
+                inner_feat_selection=not args.no_inner_feat_selection,
+                use_precomputed_cross_nmi=not args.no_use_precomputed_cross_nmi,
             )
             summary["official_feature_folds"] = str(feature_dir)
 
@@ -559,6 +616,15 @@ def main() -> None:
     for task in tasks:
         print(f"\n=== Official MODNet v0.1.12: {task} ===", flush=True)
         try:
+            if args.skip_existing and task_outputs_complete(
+                output_dir, task, require_feature_folds=args.export_feature_folds
+            ):
+                metadata_path = output_dir / task / "official-modnet-run-metadata.json"
+                summary = json.loads(metadata_path.read_text(encoding="utf-8"))
+                summary["skipped_existing"] = True
+                summaries.append(summary)
+                print(json.dumps(summary, indent=2), flush=True)
+                continue
             summary = run_task(args, task, output_dir)
             summaries.append(summary)
             print(json.dumps(summary, indent=2), flush=True)

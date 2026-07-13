@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-TASK_SET="all"
+TASK_SET="small"
 TASKS=()
 OFFICIAL_ENV="modnet-v012-matbench"
 KAN_ENV="kan-cgcnn-cuda"
@@ -57,7 +57,6 @@ DRY_RUN=0
 ALL_TASKS=(
   matbench_dielectric
   matbench_expt_gap
-  matbench_expt_is_metal
   matbench_glass
   matbench_jdft2d
   matbench_elastic
@@ -72,7 +71,6 @@ ALL_TASKS=(
 SMALL_TASKS=(
   matbench_dielectric
   matbench_expt_gap
-  matbench_expt_is_metal
   matbench_glass
   matbench_jdft2d
   matbench_elastic
@@ -264,8 +262,11 @@ if [[ "$SKIP_OFFICIAL" -eq 0 ]]; then
     python -u scripts/run_official_modnet_matbench.py
     --tasks "${TASKS[@]}"
     --n-jobs "$N_JOBS"
+    --hp-strategy fit_preset
+    --random-state 7
     --nested-folds "$NESTED_FOLDS"
     --n-models "$N_MODELS"
+    --skip-existing
     --export-feature-folds
     --export-max-features "$EXPORT_MAX_FEATURES"
     --output-dir "$OFFICIAL_OUTPUT_DIR"

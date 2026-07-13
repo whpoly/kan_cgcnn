@@ -14,14 +14,14 @@ set -euo pipefail
 CONDA_PATH="${CONDA_PATH:-/home/wuhao/miniconda3/etc/profile.d/conda.sh}"
 PROJECT_DIR="${PROJECT_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}"
 ENV_NAME="${ENV_NAME:-modnet-kan}"
-TASK_SET="${TASK_SET:-all}"
+TASK_SET="${TASK_SET:-small}"
 RUN_ID="${RUN_ID:-${TASK_SET}-oneenv-$(date +%Y%m%d-%H%M%S)}"
+OFFICIAL_N_JOBS="${OFFICIAL_N_JOBS:-4}"
 
 ALL_TASKS=(
   matbench_dielectric
   matbench_elastic
   matbench_expt_gap
-  matbench_expt_is_metal
   matbench_glass
   matbench_jdft2d
   matbench_mp_e_form
@@ -36,7 +36,6 @@ SMALL_TASKS=(
   matbench_dielectric
   matbench_elastic
   matbench_expt_gap
-  matbench_expt_is_metal
   matbench_glass
   matbench_jdft2d
   matbench_perovskites
@@ -77,9 +76,12 @@ TUNE_OUTPUT_ROOT="benchmarks/tune-modnet-kan-${RUN_ID}"
 conda run --no-capture-output -n "$ENV_NAME" \
   python -u scripts/run_official_modnet_matbench.py \
   --tasks "${TASKS[@]}" \
-  --n-jobs "${SLURM_CPUS_PER_TASK:-16}" \
+  --n-jobs "$OFFICIAL_N_JOBS" \
+  --hp-strategy fit_preset \
+  --random-state 7 \
   --nested-folds 5 \
   --n-models 5 \
+  --skip-existing \
   --export-feature-folds \
   --export-max-features 512 \
   --output-dir "$OFFICIAL_OUTPUT_DIR"

@@ -254,6 +254,14 @@ are trained as one two-output model. In unified mode, official MODNet and
 `mlp`/`fastkan`/`spline` all run inside `modnet-kan`. Use `--task-set small` or
 `TASK_SET=small` only for a faster debug run.
 
+The official MODNet stage calls `modnet.matbench.benchmark.matbench_benchmark`
+with the documented Matbench settings: `EnsembleMODNetModel`,
+`hp_strategy=fit_preset`, fold-internal feature selection,
+`use_precomputed_cross_nmi=True`, 5-model ensembles, and nested preset
+selection unless `--fast` is used. The runner exposes these switches as
+`--hp-strategy`, `--no-hp-optimization`, `--no-inner-feat-selection`,
+`--no-use-precomputed-cross-nmi`, `--save-folds`, and `--random-state`.
+
 ```powershell
 conda env create -f environment-modnet-v012.yml
 conda activate modnet-v012-matbench
