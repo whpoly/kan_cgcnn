@@ -38,6 +38,20 @@ MODEL_FAMILIES = [
 ]
 DEFAULT_MODEL_FAMILIES = ["mlp", "fastkan", "spline"]
 TASK_TYPES = ("regression", "classification")
+SYMBOLIC_FUNCTIONS = (
+    "identity",
+    "square",
+    "cube",
+    "sin",
+    "cos",
+    "tanh",
+    "exp",
+    "log",
+    "sqrt",
+    "reciprocal",
+    "product",
+    "ratio",
+)
 METRIC_NAMES = [
     "mae",
     "rmse",
@@ -285,7 +299,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--simple-formula-min-inputs", type=int, default=5)
     parser.add_argument("--simple-formula-max-inputs", type=int, default=10)
     parser.add_argument("--simple-formula-max-terms", type=int, default=10)
+    parser.add_argument(
+        "--simple-formula-method",
+        choices=["symbolic", "polynomial"],
+        default="symbolic",
+    )
     parser.add_argument("--simple-formula-degree", type=int, choices=[1, 2], default=2)
+    parser.add_argument(
+        "--simple-formula-functions",
+        nargs="+",
+        choices=SYMBOLIC_FUNCTIONS,
+        default=list(SYMBOLIC_FUNCTIONS),
+    )
+    parser.add_argument("--simple-formula-epsilon", type=float, default=1e-3)
+    parser.add_argument("--simple-formula-exp-clip", type=float, default=8.0)
     parser.add_argument("--simple-formula-coverage", type=float, default=0.95)
     parser.add_argument("--simple-formula-calibration-ratio", type=float, default=0.1)
     parser.add_argument("--skip-final", action="store_true")
@@ -923,8 +950,16 @@ def benchmark_command(
                 str(args.simple_formula_max_inputs),
                 "--simple-formula-max-terms",
                 str(args.simple_formula_max_terms),
+                "--simple-formula-method",
+                str(args.simple_formula_method),
                 "--simple-formula-degree",
                 str(args.simple_formula_degree),
+                "--simple-formula-functions",
+                *[str(value) for value in args.simple_formula_functions],
+                "--simple-formula-epsilon",
+                str(args.simple_formula_epsilon),
+                "--simple-formula-exp-clip",
+                str(args.simple_formula_exp_clip),
                 "--simple-formula-coverage",
                 str(args.simple_formula_coverage),
                 "--simple-formula-calibration-ratio",
@@ -1042,6 +1077,15 @@ def resume_payload_matches_command(payload: dict[str, Any], cmd: list[str]) -> b
         "--activation": ("activation", str),
         "--val-ratio": ("val_ratio", float),
         "--seed": ("seed", int),
+        "--simple-formula-method": ("simple_formula_method", str),
+        "--simple-formula-degree": ("simple_formula_degree", int),
+        "--simple-formula-min-inputs": ("simple_formula_min_inputs", int),
+        "--simple-formula-max-inputs": ("simple_formula_max_inputs", int),
+        "--simple-formula-max-terms": ("simple_formula_max_terms", int),
+        "--simple-formula-epsilon": ("simple_formula_epsilon", float),
+        "--simple-formula-exp-clip": ("simple_formula_exp_clip", float),
+        "--simple-formula-coverage": ("simple_formula_coverage", float),
+        "--simple-formula-calibration-ratio": ("simple_formula_calibration_ratio", float),
     }
     for option, (payload_key, value_type) in scalar_options.items():
         expected_text = command_option(cmd, option)
@@ -1064,6 +1108,7 @@ def resume_payload_matches_command(payload: dict[str, Any], cmd: list[str]) -> b
         "--property-dims": "property_dims",
         "--target-dims": "target_dims",
         "--folds": "folds",
+        "--simple-formula-functions": "simple_formula_functions",
     }.items():
         expected_values = command_option_values(cmd, option)
         if not expected_values:
@@ -1088,6 +1133,9 @@ def resume_payload_matches_command(payload: dict[str, Any], cmd: list[str]) -> b
     expected_mode = command_option(cmd, "--kan-sparsity-mode") or "edge-group"
     actual_mode = payload_args.get("kan_sparsity_mode")
     if expected_lambda > 0 and actual_mode != expected_mode:
+        return False
+    expected_distillation = "--distill-simple-formula" in cmd
+    if bool(payload_args.get("distill_simple_formula", False)) != expected_distillation:
         return False
     return True
 
@@ -1511,6 +1559,12 @@ def aggregate_nested_final_rows(
             paths = [str(row[path_key]) for row in family_rows if row.get(path_key)]
             if paths:
                 summary[f"{path_key}s"] = ";".join(paths)
+        for formula_key in ("simple_formula_method", "simple_formula_functions"):
+            values = sorted(
+                {str(row[formula_key]) for row in family_rows if row.get(formula_key)}
+            )
+            if values:
+                summary[formula_key] = ";".join(values)
         summaries.append(summary)
     return summaries
 
@@ -2000,7 +2054,9 @@ def run_nested_protocol(
                 if args.fail_fast:
                     raise
 
-            if family == "mlp" or args.posthoc_prune_kan_fraction <= 0:
+            # Every selected KAN automatically receives a post-hoc artifact run.
+            # A zero prune fraction disables structural pruning, not interpretation.
+            if family == "mlp":
                 continue
             interpretation_dir = (
                 output_dir
@@ -2022,7 +2078,7 @@ def run_nested_protocol(
                 val_ratio_override=0.0,
                 prune_fraction_override=args.posthoc_prune_kan_fraction,
                 kan_l1_lambda_override=args.posthoc_kan_sparsity_lambda,
-                distill_simple_formula=True,
+                distill_simple_formula=task_type == "regression",
             )
             interpretation_cmd.append("--no-matbench-records")
             final_commands[str(outer_fold)][family]["posthoc_interpretation"] = (
@@ -2133,6 +2189,12 @@ def run_nested_protocol(
         "benchmark_kan_sparsity_lambda": 0.0,
         "posthoc_kan_sparsity_lambda": args.posthoc_kan_sparsity_lambda,
         "kan_sparsity_mode": args.kan_sparsity_mode,
+        "posthoc_formula_generation": "automatic for every selected regression KAN",
+        "simple_formula_method": args.simple_formula_method,
+        "simple_formula_functions": args.simple_formula_functions,
+        "simple_formula_max_terms": args.simple_formula_max_terms,
+        "simple_formula_epsilon": args.simple_formula_epsilon,
+        "simple_formula_exp_clip": args.simple_formula_exp_clip,
         "simple_formula_input_candidates": list(
             range(args.simple_formula_min_inputs, args.simple_formula_max_inputs + 1)
         ),
@@ -2182,6 +2244,14 @@ def main() -> None:
         raise ValueError("--posthoc-prune-kan-fraction must be in [0, 1)")
     if not 1 <= args.simple_formula_min_inputs <= args.simple_formula_max_inputs:
         raise ValueError("simple formula input limits must satisfy 1 <= min <= max")
+    if args.simple_formula_max_terms < 1:
+        raise ValueError("--simple-formula-max-terms must be positive")
+    if args.simple_formula_epsilon <= 0 or args.simple_formula_exp_clip <= 0:
+        raise ValueError("symbolic epsilon and exp clip must be positive")
+    if args.simple_formula_method == "symbolic" and not any(
+        name not in {"product", "ratio"} for name in args.simple_formula_functions
+    ):
+        raise ValueError("symbolic regression needs at least one unary function")
     if not 0.0 < args.simple_formula_coverage < 1.0:
         raise ValueError("--simple-formula-coverage must be in (0, 1)")
     task_type = matbench_task_type(args.dataset)

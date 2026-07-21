@@ -23,6 +23,20 @@ MODEL_FAMILIES = [
 ]
 DEFAULT_MODEL_FAMILIES = ["mlp", "fastkan", "spline"]
 TASK_TYPES = ["regression", "classification"]
+SYMBOLIC_FUNCTIONS = (
+    "identity",
+    "square",
+    "cube",
+    "sin",
+    "cos",
+    "tanh",
+    "exp",
+    "log",
+    "sqrt",
+    "reciprocal",
+    "product",
+    "ratio",
+)
 FEATURE_PRESETS = [
     "auto",
     "pymatgen-composition",
@@ -149,6 +163,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--simple-formula-min-inputs", type=int, default=5)
     parser.add_argument("--simple-formula-max-inputs", type=int, default=10)
     parser.add_argument("--simple-formula-max-terms", type=int, default=10)
+    parser.add_argument(
+        "--simple-formula-method",
+        choices=["symbolic", "polynomial"],
+        default="symbolic",
+    )
+    parser.add_argument("--simple-formula-degree", type=int, choices=[1, 2], default=2)
+    parser.add_argument(
+        "--simple-formula-functions",
+        nargs="+",
+        choices=SYMBOLIC_FUNCTIONS,
+        default=list(SYMBOLIC_FUNCTIONS),
+    )
+    parser.add_argument("--simple-formula-epsilon", type=float, default=1e-3)
+    parser.add_argument("--simple-formula-exp-clip", type=float, default=8.0)
     parser.add_argument("--simple-formula-coverage", type=float, default=0.95)
     parser.add_argument("--simple-formula-calibration-ratio", type=float, default=0.1)
     parser.add_argument("--skip-final", action="store_true")
@@ -309,6 +337,16 @@ def build_tune_command(args: argparse.Namespace, dataset: str, output_dir: Path)
         str(args.simple_formula_max_inputs),
         "--simple-formula-max-terms",
         str(args.simple_formula_max_terms),
+        "--simple-formula-method",
+        args.simple_formula_method,
+        "--simple-formula-degree",
+        str(args.simple_formula_degree),
+        "--simple-formula-functions",
+        *[str(value) for value in args.simple_formula_functions],
+        "--simple-formula-epsilon",
+        str(args.simple_formula_epsilon),
+        "--simple-formula-exp-clip",
+        str(args.simple_formula_exp_clip),
         "--simple-formula-coverage",
         str(args.simple_formula_coverage),
         "--simple-formula-calibration-ratio",
@@ -709,6 +747,14 @@ def existing_summary(dataset_dir: Path, dataset: str, skip_final: bool) -> Path 
 
 def main() -> None:
     args = parse_args()
+    if args.simple_formula_max_terms < 1:
+        raise ValueError("--simple-formula-max-terms must be positive")
+    if args.simple_formula_epsilon <= 0 or args.simple_formula_exp_clip <= 0:
+        raise ValueError("symbolic epsilon and exp clip must be positive")
+    if args.simple_formula_method == "symbolic" and not any(
+        name not in {"product", "ratio"} for name in args.simple_formula_functions
+    ):
+        raise ValueError("symbolic regression needs at least one unary function")
     metadata = matbench_metadata()
     if args.list_datasets:
         for dataset in supported_datasets(metadata, args):

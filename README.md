@@ -121,7 +121,9 @@ The default reliable tuning protocol is:
 - KAN grid sizes `2`, `3`, and `5`, spline orders `2` and `3`, official-style
   learning rates, and architecture sizes are tuned with MAE loss; pruning is
   fixed at `0.3` only in the post-hoc run;
-- post-hoc formula distillation evaluates `5..10` descriptor inputs, selects
+- post-hoc symbolic regression evaluates `5..10` descriptor inputs and at most
+  10 terms from a protected common-function library (`x`, powers, products,
+  ratios, `sin`, `cos`, `tanh`, `exp`, `log`, `sqrt`, and reciprocal), selects
   the smallest formula within 2% of the best inner validation fidelity, and
   reports its outer-test target MAE;
 - a reserved calibration subset provides an assumption-conditioned
@@ -407,6 +409,8 @@ python scripts/tune_modnet_kan.py `
   --simple-formula-min-inputs 5 `
   --simple-formula-max-inputs 10 `
   --simple-formula-max-terms 10 `
+  --simple-formula-method symbolic `
+  --simple-formula-functions identity square cube sin cos tanh exp log sqrt reciprocal product ratio `
   --simple-formula-coverage 0.95 `
   --simple-formula-calibration-ratio 0.1 `
   --target-scale none `
@@ -468,10 +472,13 @@ directory, for example `formula-matbench_phonons-fold0-fastkan.txt`. Use
 `--formula-top-k` to control how many nonzero terms are shown per layer/output,
 `--formula-top-k 0` to write all nonzero terms, `--formula-min-abs` to hide tiny
 coefficients, or `--no-export-final-formulas` to disable the layerwise files.
-The more compact `simple-formula-*.txt/.json` artifacts compare 5 through 10
-descriptor inputs, show the validation fidelity curve, and report formula MAE,
-teacher-fidelity MAE/R2, conformal radius, requested coverage, and empirical
-outer-test coverage.
+The more compact `simple-formula-*.txt/.json` artifacts are generated
+automatically for every selected regression KAN in the post-hoc stage. They
+compare 5 through 10 descriptor inputs, show the validation fidelity curve, and
+report the selected symbolic expression, formula MAE, teacher-fidelity MAE/R2,
+conformal radius, requested coverage, and empirical outer-test coverage. The
+protected definitions of `log`, `sqrt`, reciprocal/ratio, and clipped `exp` are
+written literally into the expression so its numerical domain is explicit.
 
 Matbench-strict all-dataset run:
 

@@ -60,6 +60,21 @@ METRIC_NAMES = [
     "f1",
     "rocauc",
 ]
+SYMBOLIC_FUNCTIONS = (
+    "identity",
+    "square",
+    "cube",
+    "sin",
+    "cos",
+    "tanh",
+    "exp",
+    "log",
+    "sqrt",
+    "reciprocal",
+    "product",
+    "ratio",
+)
+DEFAULT_SYMBOLIC_FUNCTIONS = list(SYMBOLIC_FUNCTIONS)
 
 
 class TargetScaler:
@@ -318,7 +333,7 @@ def parse_args() -> argparse.Namespace:
         "--distill-simple-formula",
         action="store_true",
         help=(
-            "Distill a sparse polynomial surrogate from the trained model using at "
+            "Distill a sparse symbolic surrogate from the trained model using at "
             "most --simple-formula-max-inputs descriptors. This is a post-hoc "
             "interpretability experiment, not a tuning metric."
         ),
@@ -326,7 +341,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--simple-formula-min-inputs", type=int, default=5)
     parser.add_argument("--simple-formula-max-inputs", type=int, default=10)
     parser.add_argument("--simple-formula-max-terms", type=int, default=10)
+    parser.add_argument(
+        "--simple-formula-method",
+        choices=["symbolic", "polynomial"],
+        default="symbolic",
+        help="Use a protected common-function library or the legacy degree-1/2 polynomial library.",
+    )
     parser.add_argument("--simple-formula-degree", type=int, choices=[1, 2], default=2)
+    parser.add_argument(
+        "--simple-formula-functions",
+        nargs="+",
+        choices=SYMBOLIC_FUNCTIONS,
+        default=DEFAULT_SYMBOLIC_FUNCTIONS,
+        help=(
+            "Candidate functions for symbolic regression. log/sqrt use abs(x), "
+            "reciprocal/ratio use a protected denominator, and exp is clipped."
+        ),
+    )
+    parser.add_argument("--simple-formula-epsilon", type=float, default=1e-3)
+    parser.add_argument("--simple-formula-exp-clip", type=float, default=8.0)
     parser.add_argument(
         "--simple-formula-coverage",
         type=float,
@@ -1222,6 +1255,185 @@ def _polynomial_library(
     return matrix.astype(float, copy=False), names
 
 
+def _protected_denominator(values: np.ndarray, epsilon: float) -> np.ndarray:
+    signs = np.where(values < 0.0, -1.0, 1.0)
+    return signs * np.maximum(np.abs(values), epsilon)
+
+
+def _symbolic_library(
+    values: np.ndarray,
+    variable_names: list[str],
+    functions: list[str] | tuple[str, ...],
+    epsilon: float,
+    exp_clip: float,
+) -> tuple[np.ndarray, list[str]]:
+    """Build a finite, human-readable library of protected symbolic terms."""
+
+    values = np.asarray(values, dtype=float)
+    if values.ndim != 2 or values.shape[1] != len(variable_names):
+        raise ValueError("Symbolic values and variable names have incompatible shapes")
+    if epsilon <= 0 or exp_clip <= 0:
+        raise ValueError("Symbolic epsilon and exp clip must be positive")
+    unknown = sorted(set(functions) - set(SYMBOLIC_FUNCTIONS))
+    if unknown:
+        raise ValueError(f"Unsupported symbolic functions: {unknown}")
+    enabled = list(dict.fromkeys(functions))
+    columns: list[np.ndarray] = []
+    names: list[str] = []
+
+    def append(column: np.ndarray, name: str) -> None:
+        column = np.nan_to_num(
+            np.asarray(column, dtype=float),
+            nan=0.0,
+            posinf=np.finfo(float).max ** 0.25,
+            neginf=-(np.finfo(float).max ** 0.25),
+        )
+        columns.append(column)
+        names.append(name)
+
+    for idx, name in enumerate(variable_names):
+        value = values[:, idx]
+        if "identity" in enabled:
+            append(value, name)
+        if "square" in enabled:
+            append(value**2, f"({name})^2")
+        if "cube" in enabled:
+            append(value**3, f"({name})^3")
+        if "sin" in enabled:
+            append(np.sin(value), f"sin({name})")
+        if "cos" in enabled:
+            append(np.cos(value), f"cos({name})")
+        if "tanh" in enabled:
+            append(np.tanh(value), f"tanh({name})")
+        if "exp" in enabled:
+            append(
+                np.exp(np.clip(value, -exp_clip, exp_clip)),
+                f"exp(clip({name}, {-exp_clip:.6g}, {exp_clip:.6g}))",
+            )
+        if "log" in enabled:
+            append(np.log(np.abs(value) + epsilon), f"log(abs({name})+{epsilon:.6g})")
+        if "sqrt" in enabled:
+            append(np.sqrt(np.abs(value)), f"sqrt(abs({name}))")
+        if "reciprocal" in enabled:
+            append(
+                1.0 / _protected_denominator(value, epsilon),
+                f"1/protected({name}, eps={epsilon:.6g})",
+            )
+
+    if "product" in enabled:
+        for left in range(values.shape[1]):
+            for right in range(left + 1, values.shape[1]):
+                append(
+                    values[:, left] * values[:, right],
+                    f"({variable_names[left]})*({variable_names[right]})",
+                )
+    if "ratio" in enabled:
+        for numerator in range(values.shape[1]):
+            for denominator in range(values.shape[1]):
+                if numerator == denominator:
+                    continue
+                append(
+                    values[:, numerator]
+                    / _protected_denominator(values[:, denominator], epsilon),
+                    f"({variable_names[numerator]})/protected({variable_names[denominator]}, eps={epsilon:.6g})",
+                )
+    if not columns:
+        raise ValueError("The symbolic function library is empty")
+    return np.column_stack(columns), names
+
+
+def _symbolic_term_dependencies(
+    n_variables: int,
+    functions: list[str] | tuple[str, ...],
+) -> list[list[int]]:
+    enabled = list(dict.fromkeys(functions))
+    dependencies: list[list[int]] = []
+    unary = [name for name in enabled if name not in {"product", "ratio"}]
+    for idx in range(n_variables):
+        dependencies.extend([[idx] for _ in unary])
+    if "product" in enabled:
+        for left in range(n_variables):
+            for right in range(left + 1, n_variables):
+                dependencies.append([left, right])
+    if "ratio" in enabled:
+        for numerator in range(n_variables):
+            for denominator in range(n_variables):
+                if numerator != denominator:
+                    dependencies.append([numerator, denominator])
+    return dependencies
+
+
+def _polynomial_term_dependencies(n_variables: int, degree: int) -> list[list[int]]:
+    dependencies = [[idx] for idx in range(n_variables)]
+    if degree >= 2:
+        for left in range(n_variables):
+            for right in range(left, n_variables):
+                dependencies.append(sorted({left, right}))
+    return dependencies
+
+
+def _fit_sparse_library(
+    library: np.ndarray,
+    target: np.ndarray,
+    term_names: list[str],
+    max_terms: int,
+) -> dict[str, Any]:
+    """Select a compact term set with OMP and a BIC stopping rule, then refit."""
+
+    library = np.asarray(library, dtype=float)
+    target = np.asarray(target, dtype=float).reshape(-1)
+    if library.shape[0] != len(target) or library.shape[1] != len(term_names):
+        raise ValueError("Symbolic library and target have incompatible shapes")
+    standard_deviation = library.std(axis=0)
+    usable = np.flatnonzero(np.isfinite(standard_deviation) & (standard_deviation > 1e-12))
+    if len(usable) == 0:
+        raise ValueError("The symbolic library contains no nonconstant finite terms")
+    centered = library[:, usable] - library[:, usable].mean(axis=0, keepdims=True)
+    normalized = centered / standard_deviation[usable]
+    normalized /= np.maximum(np.linalg.norm(normalized, axis=0, keepdims=True), 1e-12)
+
+    limit = min(max(1, int(max_terms)), len(usable), max(1, len(target) - 2))
+    selected_local: list[int] = []
+    residual = target - target.mean()
+    best_selected: list[int] = []
+    best_bic = float("inf")
+    best_mse = float("inf")
+    for _ in range(limit):
+        scores = np.abs(normalized.T @ residual)
+        if selected_local:
+            scores[np.asarray(selected_local, dtype=int)] = -np.inf
+        candidate = int(np.argmax(scores))
+        if not np.isfinite(scores[candidate]):
+            break
+        selected_local.append(candidate)
+        selected_global = usable[np.asarray(selected_local, dtype=int)]
+        design = np.column_stack([np.ones(len(target)), library[:, selected_global]])
+        coefficients = np.linalg.lstsq(design, target, rcond=None)[0]
+        residual = target - design @ coefficients
+        mse = float(np.mean(residual**2))
+        bic = len(target) * np.log(max(mse, 1e-24)) + len(selected_local) * np.log(len(target))
+        if bic < best_bic - 1e-10:
+            best_bic = bic
+            best_mse = mse
+            best_selected = list(selected_local)
+        if mse <= 1e-24:
+            break
+
+    if not best_selected:
+        best_selected = [selected_local[0]]
+    selected = usable[np.asarray(best_selected, dtype=int)]
+    design = np.column_stack([np.ones(len(target)), library[:, selected]])
+    sparse_coef = np.linalg.lstsq(design, target, rcond=None)[0]
+    return {
+        "intercept": float(sparse_coef[0]),
+        "coefficients": [float(value) for value in sparse_coef[1:]],
+        "term_indices": [int(value) for value in selected],
+        "term_names": [term_names[int(value)] for value in selected],
+        "selection_bic": float(best_bic),
+        "fit_mse": float(best_mse),
+    }
+
+
 def _fit_sparse_polynomial(
     values: np.ndarray,
     target: np.ndarray,
@@ -1245,13 +1457,55 @@ def _fit_sparse_polynomial(
     selected = selected[np.argsort(selected)]
     sparse_design = np.column_stack([np.ones(len(library)), library[:, selected]])
     sparse_coef = np.linalg.lstsq(sparse_design, target, rcond=None)[0]
+    dependencies = _polynomial_term_dependencies(values.shape[1], degree)
+    active_variables = sorted(
+        {variable for term_idx in selected for variable in dependencies[int(term_idx)]}
+    )
     return {
         "intercept": float(sparse_coef[0]),
         "coefficients": [float(value) for value in sparse_coef[1:]],
         "term_indices": [int(value) for value in selected],
         "term_names": [term_names[int(value)] for value in selected],
         "degree": int(degree),
+        "method": "polynomial",
+        "active_variable_indices": active_variables,
     }
+
+
+def _fit_sparse_symbolic(
+    values: np.ndarray,
+    target: np.ndarray,
+    variable_names: list[str],
+    functions: list[str] | tuple[str, ...],
+    epsilon: float,
+    exp_clip: float,
+    max_terms: int,
+) -> dict[str, Any]:
+    library, term_names = _symbolic_library(
+        values,
+        variable_names,
+        functions,
+        epsilon,
+        exp_clip,
+    )
+    specification = _fit_sparse_library(library, target, term_names, max_terms)
+    dependencies = _symbolic_term_dependencies(values.shape[1], functions)
+    specification["active_variable_indices"] = sorted(
+        {
+            variable
+            for term_idx in specification["term_indices"]
+            for variable in dependencies[int(term_idx)]
+        }
+    )
+    specification.update(
+        {
+            "method": "symbolic",
+            "functions": list(dict.fromkeys(functions)),
+            "epsilon": float(epsilon),
+            "exp_clip": float(exp_clip),
+        }
+    )
+    return specification
 
 
 def _predict_sparse_polynomial(
@@ -1259,7 +1513,16 @@ def _predict_sparse_polynomial(
     values: np.ndarray,
     variable_names: list[str],
 ) -> np.ndarray:
-    library, _ = _polynomial_library(values, variable_names, int(specification["degree"]))
+    if specification.get("method", "polynomial") == "symbolic":
+        library, _ = _symbolic_library(
+            values,
+            variable_names,
+            specification["functions"],
+            float(specification["epsilon"]),
+            float(specification["exp_clip"]),
+        )
+    else:
+        library, _ = _polynomial_library(values, variable_names, int(specification["degree"]))
     selected = np.asarray(specification["term_indices"], dtype=int)
     coefficients = np.asarray(specification["coefficients"], dtype=float)
     return float(specification["intercept"]) + library[:, selected] @ coefficients
@@ -1280,6 +1543,27 @@ def _absolute_correlation(values: np.ndarray, target: np.ndarray) -> np.ndarray:
     )
 
 
+def _symbolic_feature_relevance(
+    values: np.ndarray,
+    target: np.ndarray,
+    functions: list[str] | tuple[str, ...],
+    epsilon: float,
+    exp_clip: float,
+) -> np.ndarray:
+    unary_functions = [name for name in functions if name not in {"product", "ratio"}]
+    relevance = np.zeros(values.shape[1], dtype=float)
+    for idx in range(values.shape[1]):
+        library, _ = _symbolic_library(
+            values[:, [idx]],
+            ["z"],
+            unary_functions,
+            epsilon,
+            exp_clip,
+        )
+        relevance[idx] = float(np.max(_absolute_correlation(library, target)))
+    return relevance
+
+
 def _select_simple_formula(
     features: np.ndarray,
     teacher_target: np.ndarray,
@@ -1289,6 +1573,10 @@ def _select_simple_formula(
     max_terms: int,
     degree: int,
     seed: int,
+    method: str = "polynomial",
+    symbolic_functions: list[str] | tuple[str, ...] | None = None,
+    epsilon: float = 1e-3,
+    exp_clip: float = 8.0,
 ) -> dict[str, Any]:
     if len(features) < 8:
         raise ValueError("At least 8 teacher-training samples are required for formula distillation")
@@ -1298,7 +1586,19 @@ def _select_simple_formula(
     selection_size = min(selection_size, len(features) - 4)
     selection_indices = permutation[:selection_size]
     fit_indices = permutation[selection_size:]
-    correlations = _absolute_correlation(features[fit_indices], teacher_target[fit_indices])
+    functions = list(symbolic_functions or DEFAULT_SYMBOLIC_FUNCTIONS)
+    if method == "symbolic":
+        correlations = _symbolic_feature_relevance(
+            features[fit_indices],
+            teacher_target[fit_indices],
+            functions,
+            epsilon,
+            exp_clip,
+        )
+    elif method == "polynomial":
+        correlations = _absolute_correlation(features[fit_indices], teacher_target[fit_indices])
+    else:
+        raise ValueError(f"Unsupported simple formula method {method!r}")
     pool_size = min(features.shape[1], max(20, 4 * max_inputs))
     candidate_pool = [int(value) for value in np.argsort(correlations)[-pool_size:][::-1]]
 
@@ -1313,13 +1613,24 @@ def _select_simple_formula(
                 continue
             attempted = selected + [candidate]
             variable_names = [f"z{idx}" for idx in range(len(attempted))]
-            specification = _fit_sparse_polynomial(
-                features[fit_indices][:, attempted],
-                teacher_target[fit_indices],
-                variable_names,
-                degree,
-                max_terms,
-            )
+            if method == "symbolic":
+                specification = _fit_sparse_symbolic(
+                    features[fit_indices][:, attempted],
+                    teacher_target[fit_indices],
+                    variable_names,
+                    functions,
+                    epsilon,
+                    exp_clip,
+                    max_terms,
+                )
+            else:
+                specification = _fit_sparse_polynomial(
+                    features[fit_indices][:, attempted],
+                    teacher_target[fit_indices],
+                    variable_names,
+                    degree,
+                    max_terms,
+                )
             prediction = _predict_sparse_polynomial(
                 specification,
                 features[selection_indices][:, attempted],
@@ -1368,17 +1679,36 @@ def _select_simple_formula(
     )
     selected = list(chosen["feature_indices"])
     variable_names = [f"z{idx}" for idx in range(len(selected))]
-    specification = _fit_sparse_polynomial(
-        features[:, selected],
-        teacher_target,
-        variable_names,
-        degree,
-        max_terms,
-    )
+    if method == "symbolic":
+        specification = _fit_sparse_symbolic(
+            features[:, selected],
+            teacher_target,
+            variable_names,
+            functions,
+            epsilon,
+            exp_clip,
+            max_terms,
+        )
+    else:
+        specification = _fit_sparse_polynomial(
+            features[:, selected],
+            teacher_target,
+            variable_names,
+            degree,
+            max_terms,
+        )
     specification.update(
         {
             "feature_indices": selected,
             "feature_names": [str(feature_names[idx]) for idx in selected],
+            "active_feature_indices": [
+                selected[idx]
+                for idx in specification.get("active_variable_indices", range(len(selected)))
+            ],
+            "active_feature_names": [
+                str(feature_names[selected[idx]])
+                for idx in specification.get("active_variable_indices", range(len(selected)))
+            ],
             "variable_names": variable_names,
             "selection_teacher_mae": float(chosen["selection_teacher_mae"]),
             "input_fidelity_curve": [
@@ -1470,7 +1800,7 @@ def distill_simple_formulas(
     fold: int,
 ) -> dict[str, Any]:
     if task_type != "regression":
-        raise ValueError("Simple polynomial formula distillation currently supports regression only")
+        raise ValueError("Simple symbolic formula distillation currently supports regression only")
     min_inputs = int(args.simple_formula_min_inputs)
     max_inputs = int(args.simple_formula_max_inputs)
     max_terms = int(args.simple_formula_max_terms)
@@ -1512,6 +1842,11 @@ def distill_simple_formulas(
         "scope = formula distillation and calibration use only the outer train+validation partition",
         "outer_test_role = final evaluation only",
         f"requested_conformal_coverage = {100.0 * args.simple_formula_coverage:.6g}%",
+        f"formula_method = {args.simple_formula_method}",
+        "symbolic_functions = "
+        + ",".join(args.simple_formula_functions)
+        if args.simple_formula_method == "symbolic"
+        else f"polynomial_degree = {args.simple_formula_degree}",
         "coverage_statement = P(|teacher(x)-formula(x)| <= radius) >= requested coverage under exchangeability",
         "note = this is an assumption-conditioned split-conformal statement, not an unconditional guarantee",
         "note = the coverage percentage is meaningful only together with its target-unit radius",
@@ -1527,6 +1862,10 @@ def distill_simple_formulas(
             max_terms=max_terms,
             degree=int(args.simple_formula_degree),
             seed=args.seed + fold * 1009 + target_idx,
+            method=args.simple_formula_method,
+            symbolic_functions=args.simple_formula_functions,
+            epsilon=float(args.simple_formula_epsilon),
+            exp_clip=float(args.simple_formula_exp_clip),
         )
         selected = specification["feature_indices"]
         variable_names = specification["variable_names"]
@@ -1558,6 +1897,7 @@ def distill_simple_formulas(
             **specification,
             "target": target_name,
             "expression": _formula_expression(specification),
+            "formula_method": args.simple_formula_method,
             "conformal_coverage": float(args.simple_formula_coverage),
             "conformal_radius": radius,
             "calibration_size": int(len(calibration_residual)),
@@ -1566,10 +1906,13 @@ def distill_simple_formulas(
             "test_fidelity_r2": fidelity_r2,
             "test_empirical_coverage": empirical_coverage,
         }
+        active_variables = specification.get(
+            "active_variable_indices", list(range(len(selected)))
+        )
         record["variable_definitions"] = _formula_variable_definitions(
             prepared,
-            selected,
-            variable_names,
+            [selected[idx] for idx in active_variables],
+            [variable_names[idx] for idx in active_variables],
         )
         records.append(record)
         text_lines.extend(
@@ -1580,7 +1923,9 @@ def distill_simple_formulas(
                     for definition in record["variable_definitions"]
                 ],
                 f"  formula = {record['expression']}",
-                f"  inputs = {len(selected)}",
+                f"  formula_method = {args.simple_formula_method}",
+                f"  active_inputs = {len(active_variables)}",
+                f"  searched_inputs = {len(selected)}",
                 f"  nonconstant_terms = {len(specification['coefficients'])}",
                 "  validation_fidelity_curve = "
                 + ", ".join(
@@ -1607,10 +1952,21 @@ def distill_simple_formulas(
     return {
         "simple_formula_path": str(text_path),
         "simple_formula_json_path": str(json_path),
-        "simple_formula_n_inputs": max(len(record["feature_indices"]) for record in records),
+        "simple_formula_n_inputs": max(
+            len(record["active_feature_indices"]) for record in records
+        ),
+        "simple_formula_n_searched_inputs": max(
+            len(record["feature_indices"]) for record in records
+        ),
         "simple_formula_n_terms": max(len(record["coefficients"]) for record in records),
+        "simple_formula_method": args.simple_formula_method,
+        "simple_formula_functions": (
+            ",".join(args.simple_formula_functions)
+            if args.simple_formula_method == "symbolic"
+            else f"degree_{args.simple_formula_degree}_polynomial"
+        ),
         "simple_formula_inputs": ";".join(
-            ",".join(record["feature_names"]) for record in records
+            ",".join(record["active_feature_names"]) for record in records
         ),
         "simple_formula_requested_coverage_pct": 100.0 * float(args.simple_formula_coverage),
         "simple_formula_conformal_radius": float(
@@ -3091,7 +3447,10 @@ def ordered_fieldnames(rows: list[dict[str, Any]]) -> list[str]:
         "simple_formula_path",
         "simple_formula_json_path",
         "simple_formula_n_inputs",
+        "simple_formula_n_searched_inputs",
         "simple_formula_n_terms",
+        "simple_formula_method",
+        "simple_formula_functions",
         "simple_formula_inputs",
         "simple_formula_requested_coverage_pct",
         "simple_formula_conformal_radius",
@@ -3160,6 +3519,14 @@ def main() -> None:
         raise ValueError("--inner-fold-index requires --val-ratio > 0")
     if args.distill_simple_formula and args.skip_test_eval:
         raise ValueError("Simple formula distillation requires outer test evaluation")
+    if args.simple_formula_max_terms < 1:
+        raise ValueError("--simple-formula-max-terms must be positive")
+    if args.simple_formula_epsilon <= 0 or args.simple_formula_exp_clip <= 0:
+        raise ValueError("symbolic epsilon and exp clip must be positive")
+    if args.simple_formula_method == "symbolic" and not any(
+        name not in {"product", "ratio"} for name in args.simple_formula_functions
+    ):
+        raise ValueError("symbolic regression needs at least one unary function")
     set_seed(args.seed)
     device = resolve_device(args)
     if device.type == "cuda":

@@ -14,11 +14,14 @@ if str(SCRIPTS) not in sys.path:
 
 from benchmark_modnet_kan import (  # noqa: E402
     _conformal_radius,
+    _predict_sparse_polynomial,
     _select_simple_formula,
+    _symbolic_library,
     split_train_val,
 )
 from tune_modnet_kan import (  # noqa: E402
     annotate_against_mlp,
+    benchmark_command,
     best_trials_by_family,
     load_official_mlp_trial,
     make_trials,
@@ -79,6 +82,93 @@ def test_simple_formula_search_reports_five_to_ten_input_curve() -> None:
 def test_conformal_radius_uses_finite_sample_rank() -> None:
     residuals = np.arange(1, 21, dtype=float)
     assert _conformal_radius(residuals, coverage=0.9) == 19.0
+
+
+def test_symbolic_formula_recovers_common_function_relationship() -> None:
+    rng = np.random.default_rng(23)
+    features = np.column_stack(
+        [
+            rng.uniform(-np.pi, np.pi, size=320),
+            rng.uniform(0.2, 3.0, size=320),
+            rng.normal(size=320),
+        ]
+    )
+    epsilon = 1e-3
+    teacher = 1.7 * np.sin(features[:, 0]) - 0.6 * np.log(
+        np.abs(features[:, 1]) + epsilon
+    )
+    specification = _select_simple_formula(
+        features,
+        teacher,
+        ["angle", "positive_scale", "noise"],
+        min_inputs=2,
+        max_inputs=3,
+        max_terms=4,
+        degree=2,
+        seed=5,
+        method="symbolic",
+        symbolic_functions=["identity", "sin", "log"],
+        epsilon=epsilon,
+        exp_clip=8.0,
+    )
+    selected = specification["feature_indices"]
+    prediction = _predict_sparse_polynomial(
+        specification,
+        features[:, selected],
+        specification["variable_names"],
+    )
+
+    assert any(name.startswith("sin(") for name in specification["term_names"])
+    assert any(name.startswith("log(") for name in specification["term_names"])
+    assert np.mean(np.abs(prediction - teacher)) < 1e-8
+
+
+def test_symbolic_protected_functions_are_finite_at_zero_and_extremes() -> None:
+    values = np.array([[0.0], [1e-12], [-1e-12], [1e6], [-1e6]])
+    library, names = _symbolic_library(
+        values,
+        ["z0"],
+        ["exp", "log", "sqrt", "reciprocal"],
+        epsilon=1e-3,
+        exp_clip=8.0,
+    )
+
+    assert library.shape == (5, 4)
+    assert len(names) == 4
+    assert np.isfinite(library).all()
+
+
+def test_posthoc_command_automatically_requests_symbolic_regression(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["tune_modnet_kan.py", "--model-families", "fastkan"],
+    )
+    args = parse_args()
+    trial = make_trials(args)[0]
+    command = benchmark_command(
+        args,
+        trial,
+        folds=[0],
+        epochs=1000,
+        output_dir=tmp_path,
+        train_size=None,
+        test_size=None,
+        tuning_mode=False,
+        export_formulas=True,
+        val_ratio_override=0.0,
+        prune_fraction_override=0.3,
+        kan_l1_lambda_override=1e-4,
+        distill_simple_formula=True,
+    )
+
+    assert "--distill-simple-formula" in command
+    assert command[command.index("--simple-formula-method") + 1] == "symbolic"
+    function_start = command.index("--simple-formula-functions") + 1
+    assert "sin" in command[function_start:]
+    assert "log" in command[function_start:]
 
 
 def test_resume_does_not_mix_sparse_and_dense_models() -> None:
