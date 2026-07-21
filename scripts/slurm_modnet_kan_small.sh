@@ -107,7 +107,7 @@ for task in "${TASKS[@]}"; do
     python -u scripts/tune_modnet_kan.py \
     --dataset "$task" \
     --precomputed-feature-dir "$feature_dir" \
-    --model-families mlp fastkan spline \
+    --model-families mlp hybrid-fastkan hybrid-spline \
     --tune-folds 0 1 \
     --final-folds 0 1 2 3 4 \
     --search-space random \
@@ -121,13 +121,19 @@ for task in "${TASKS[@]}"; do
     --val-ratio 0.1 \
     --early-stopping-patience 60 \
     --loss-candidates mae rmse \
+    --activation elu \
+    --kan-l1-lambda 1e-5 \
     --prune-kan-fraction-candidates 0.3 0.5 \
+    --prune-mode edge \
+    --prune-finetune-epochs 20 \
     --scaler minmax \
     --target-scale none \
     --impute-strategy median \
     --device cuda \
     --require-cuda \
     --log-every-epochs 0 \
+    --trial-timeout-minutes 180 \
+    --resume \
     --formula-top-k 20 \
     --formula-min-abs 0 \
     --output-dir "$out_dir"

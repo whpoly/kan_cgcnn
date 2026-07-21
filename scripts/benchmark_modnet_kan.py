@@ -31,6 +31,7 @@ if str(ROOT) not in sys.path:
 from cgcnn_pyg_kan.kan import FastKANLinear, KANLinear
 from cgcnn_pyg_kan.modnet import MODNetKAN
 from cgcnn_pyg_kan.modnet_features import MODNetFeatureProcessor, make_feature_frame
+from cgcnn_pyg_kan.pruning import PruningMasks, apply_kan_pruning, kan_l1_penalty
 
 FEATURE_PRESETS = [
     "auto",
@@ -39,7 +40,16 @@ FEATURE_PRESETS = [
     "matminer-composition",
     "matminer-structure-lite",
 ]
-MODEL_CHOICES = ["mlp", "fastkan", "spline", "kan"]
+MODEL_CHOICES = [
+    "mlp",
+    "hybrid-fastkan",
+    "hybrid-spline",
+    "direct-fastkan",
+    "direct-spline",
+    "fastkan",
+    "spline",
+    "kan",
+]
 TASK_TYPES = ("regression", "classification")
 METRIC_NAMES = [
     "mae",
@@ -97,7 +107,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--dataset", default="matbench_phonons")
     parser.add_argument("--folds", type=int, nargs="+", default=[0])
-    parser.add_argument("--models", nargs="+", choices=MODEL_CHOICES, default=["fastkan"])
+    parser.add_argument("--models", nargs="+", choices=MODEL_CHOICES, default=["hybrid-fastkan"])
     parser.add_argument("--featurizer-preset", choices=FEATURE_PRESETS, default="auto")
     parser.add_argument("--featurizer-jobs", type=int, default=1)
     parser.add_argument(
@@ -173,6 +183,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--kan-impl", choices=["fastkan", "spline"], default="fastkan")
     parser.add_argument("--kan-grid-size", type=int, default=5)
     parser.add_argument("--kan-spline-order", type=int, default=3)
+    parser.add_argument(
+        "--activation",
+        choices=["relu", "elu", "silu"],
+        default="elu",
+        help="MLP trunk activation; ELU matches the official MODNet Matbench fit settings.",
+    )
     parser.add_argument("--scaler", choices=["minmax", "standard", "none"], default="minmax")
     parser.add_argument("--target-scale", choices=["none", "standard"], default="none")
     parser.add_argument("--impute-strategy", default="median")
@@ -191,9 +207,27 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.0,
         help=(
-            "Global magnitude-prune this fraction of trainable KAN-family "
-            "parameters after training and before validation/test reporting."
+            "Prune this fraction of KAN edges or coefficients after training. "
+            "The MLP trunk is never pruned."
         ),
+    )
+    parser.add_argument(
+        "--prune-mode",
+        choices=["edge", "parameter"],
+        default="edge",
+        help="edge performs interpretable structured KAN-edge pruning; parameter is scalar ablation.",
+    )
+    parser.add_argument(
+        "--prune-finetune-epochs",
+        type=int,
+        default=0,
+        help="Fine-tune after pruning while enforcing the pruning masks.",
+    )
+    parser.add_argument(
+        "--kan-l1-lambda",
+        type=float,
+        default=0.0,
+        help="Mean absolute KAN-parameter penalty used to encourage sparse predictors.",
     )
     parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--batch-size", type=int, default=128)
@@ -315,31 +349,16 @@ def count_nonzero_parameters(model: torch.nn.Module) -> int:
     )
 
 
-def apply_global_magnitude_pruning(model: torch.nn.Module, fraction: float) -> int:
-    if not 0.0 <= fraction < 1.0:
-        raise ValueError("--prune-kan-fraction must be in [0, 1)")
-    if fraction <= 0:
-        return 0
+def is_kan_family(family: str) -> bool:
+    return family != "mlp"
 
-    params = [parameter for parameter in model.parameters() if parameter.requires_grad]
-    total = sum(parameter.numel() for parameter in params)
-    n_prune = int(round(total * fraction))
-    if n_prune <= 0:
-        return 0
 
-    scores = torch.cat([parameter.detach().abs().flatten().cpu() for parameter in params])
-    prune_indices = torch.topk(scores, k=min(n_prune, total - 1), largest=False).indices
-    offset = 0
-    pruned = 0
-    for parameter in params:
-        next_offset = offset + parameter.numel()
-        local = prune_indices[(prune_indices >= offset) & (prune_indices < next_offset)] - offset
-        if local.numel() > 0:
-            flat = parameter.data.view(-1)
-            flat[local.to(device=flat.device)] = 0
-            pruned += int(local.numel())
-        offset = next_offset
-    return pruned
+def kan_impl_for_family(family: str, fallback: str = "fastkan") -> str:
+    if family.endswith("spline") or family == "spline":
+        return "spline"
+    if family.endswith("fastkan") or family == "fastkan":
+        return "fastkan"
+    return fallback
 
 
 def adamw_parameter_groups(
@@ -761,7 +780,23 @@ def build_model(
 ) -> MODNetKAN:
     family = canonical_model_name(model_name, args)
     common_dims, group_dims, property_dims, target_dims = model_dims_for_family(family, args)
-    return MODNetKAN(
+    if family.startswith("hybrid-"):
+        block_types = ("mlp", "mlp", "mlp", "kan")
+        output_head_type = "kan"
+        architecture = "modnet-mlp-trunk-kan-head"
+    elif family.startswith("direct-"):
+        block_types = ("mlp", "mlp", "mlp", "kan")
+        output_head_type = "kan"
+        architecture = "descriptor-kan"
+    elif family == "mlp":
+        block_types = ("mlp", "mlp", "mlp", "mlp")
+        output_head_type = "linear"
+        architecture = "modnet-mlp"
+    else:
+        block_types = ("kan", "kan", "kan", "kan")
+        output_head_type = "kan"
+        architecture = "modnet-kan"
+    model = MODNetKAN(
         n_feat=n_feat,
         targets=[[target_names]],
         num_neurons=(
@@ -771,11 +806,16 @@ def build_model(
             target_dims,
         ),
         block_type="mlp" if family == "mlp" else "kan",
-        kan_impl="spline" if family == "spline" else "fastkan",
+        block_types=block_types,
+        output_head_type=output_head_type,
+        mlp_activation=args.activation,
+        kan_impl=kan_impl_for_family(family, args.kan_impl),
         kan_grid_size=args.kan_grid_size,
         kan_spline_order=args.kan_spline_order,
         dropout=args.dropout,
     )
+    model.architecture = architecture  # type: ignore[attr-defined]
+    return model
 
 
 def canonical_model_name(model_name: str, args: argparse.Namespace) -> str:
@@ -794,6 +834,24 @@ def model_dims_for_family(
             clean_hidden_dims(args.mlp_group_dims or args.group_dims),
             clean_hidden_dims(args.mlp_property_dims or args.property_dims),
             clean_hidden_dims(args.mlp_target_dims if args.mlp_target_dims is not None else args.target_dims),
+        )
+    if family.startswith("direct-"):
+        return (
+            [],
+            [],
+            [],
+            clean_hidden_dims(
+                args.kan_target_dims if args.kan_target_dims is not None else args.target_dims
+            ),
+        )
+    if family.startswith("hybrid-"):
+        return (
+            clean_hidden_dims(args.mlp_common_dims or args.common_dims),
+            clean_hidden_dims(args.mlp_group_dims or args.group_dims),
+            clean_hidden_dims(args.mlp_property_dims or args.property_dims),
+            clean_hidden_dims(
+                args.kan_target_dims if args.kan_target_dims is not None else args.target_dims
+            ),
         )
     return (
         clean_hidden_dims(args.kan_common_dims or args.common_dims),
@@ -837,6 +895,8 @@ def train_one_epoch(
     device: torch.device,
     task_type: str,
     loss_name: str,
+    kan_l1_lambda: float = 0.0,
+    pruning_masks: PruningMasks | None = None,
 ) -> float:
     model.train()
     total_loss = 0.0
@@ -847,8 +907,12 @@ def train_one_epoch(
         optimizer.zero_grad(set_to_none=True)
         prediction = model(batch_x)
         loss = task_loss(prediction.view_as(batch_y), batch_y, task_type, loss_name)
+        if kan_l1_lambda > 0:
+            loss = loss + kan_l1_lambda * kan_l1_penalty(model)
         loss.backward()
         optimizer.step()
+        if pruning_masks is not None:
+            pruning_masks.enforce()
         total_loss += float(loss.detach()) * len(batch_y)
         total_samples += len(batch_y)
     return total_loss / total_samples
@@ -1037,7 +1101,15 @@ def run_model(
     sync(device)
     train_start = time.perf_counter()
     for epoch in range(1, args.epochs + 1):
-        train_loss = train_one_epoch(model, train_loader, optimizer, device, task_type, args.loss)
+        train_loss = train_one_epoch(
+            model,
+            train_loader,
+            optimizer,
+            device,
+            task_type,
+            args.loss,
+            kan_l1_lambda=args.kan_l1_lambda if is_kan_family(model_label) else 0.0,
+        )
         if val_loader is not None:
             val_metrics = evaluate(
                 model,
@@ -1053,7 +1125,7 @@ def run_model(
                 best_val_metrics = val_metrics
                 best_epoch = epoch
                 best_state = {
-                    key: value.detach().cpu() for key, value in model.state_dict().items()
+                    key: value.detach().cpu().clone() for key, value in model.state_dict().items()
                 }
                 patience_left = args.early_stopping_patience
             else:
@@ -1082,9 +1154,84 @@ def run_model(
     if best_state is not None:
         model.load_state_dict(best_state)
     params = count_parameters(model)
-    pruned_params = 0
-    if model_label in ("fastkan", "spline") and args.prune_kan_fraction > 0:
-        pruned_params = apply_global_magnitude_pruning(model, args.prune_kan_fraction)
+    pruning_masks = PruningMasks()
+    prune_finetune_seconds = 0.0
+    if is_kan_family(model_label) and args.prune_kan_fraction > 0:
+        pruning_masks = apply_kan_pruning(model, args.prune_kan_fraction, args.prune_mode)
+        print(
+            f"[{model_label}] pruned {pruning_masks.pruned_parameters} KAN parameters"
+            + (
+                f" across {pruning_masks.pruned_edges}/{pruning_masks.total_edges} edges"
+                if args.prune_mode == "edge"
+                else ""
+            ),
+            flush=True,
+        )
+        if args.prune_finetune_epochs > 0:
+            finetune_optimizer = torch.optim.AdamW(
+                adamw_parameter_groups(model, args.weight_decay),
+                lr=args.lr * 0.1,
+            )
+            prune_best_state = {
+                key: value.detach().cpu().clone() for key, value in model.state_dict().items()
+            }
+            prune_best_metrics = (
+                evaluate(
+                    model,
+                    val_loader,
+                    prepared["target_scaler"],
+                    device,
+                    task_type,
+                    target_names=target_names,
+                )
+                if val_loader is not None
+                else best_val_metrics
+            )
+            prune_best_metric = prune_best_metrics.get(val_metric_name, float("nan"))
+            finetune_start = time.perf_counter()
+            for finetune_epoch in range(1, args.prune_finetune_epochs + 1):
+                train_one_epoch(
+                    model,
+                    train_loader,
+                    finetune_optimizer,
+                    device,
+                    task_type,
+                    args.loss,
+                    pruning_masks=pruning_masks,
+                )
+                if val_loader is not None:
+                    candidate_metrics = evaluate(
+                        model,
+                        val_loader,
+                        prepared["target_scaler"],
+                        device,
+                        task_type,
+                        target_names=target_names,
+                    )
+                    if metric_is_better(
+                        candidate_metrics[val_metric_name], prune_best_metric, task_type
+                    ):
+                        prune_best_metric = candidate_metrics[val_metric_name]
+                        prune_best_metrics = candidate_metrics
+                        prune_best_state = {
+                            key: value.detach().cpu().clone()
+                            for key, value in model.state_dict().items()
+                        }
+                if args.log_every_epochs > 0 and (
+                    finetune_epoch == 1
+                    or finetune_epoch == args.prune_finetune_epochs
+                    or finetune_epoch % args.log_every_epochs == 0
+                ):
+                    print(
+                        f"[{model_label}] prune fine-tune "
+                        f"{finetune_epoch}/{args.prune_finetune_epochs}",
+                        flush=True,
+                    )
+            sync(device)
+            prune_finetune_seconds = time.perf_counter() - finetune_start
+            model.load_state_dict(prune_best_state)
+            pruning_masks.enforce()
+            best_val_metrics = prune_best_metrics
         if val_loader is not None:
             best_val_metrics = evaluate(
                 model,
@@ -1094,6 +1241,7 @@ def run_model(
                 task_type,
                 target_names=target_names,
             )
+    pruned_params = pruning_masks.pruned_parameters
     if test_loader is None:
         test_prediction = torch.empty(0)
         test_metrics = {name: float("nan") for name in METRIC_NAMES}
@@ -1128,10 +1276,11 @@ def run_model(
         "target_names": ";".join(target_names),
         "n_targets": len(target_names),
         "model": model_label,
-        "block_type": "mlp" if model_label == "mlp" else "kan",
-        "kan_impl": model_label if model_label in ("fastkan", "spline") else "none",
-        "kan_grid_size": args.kan_grid_size if model_label in ("fastkan", "spline") else "none",
-        "kan_spline_order": args.kan_spline_order if model_label == "spline" else "none",
+        "architecture": getattr(model, "architecture", "unknown"),
+        "block_type": "mlp" if model_label == "mlp" else "hybrid" if model_label.startswith("hybrid-") else "kan",
+        "kan_impl": kan_impl_for_family(model_label, args.kan_impl) if is_kan_family(model_label) else "none",
+        "kan_grid_size": args.kan_grid_size if is_kan_family(model_label) else "none",
+        "kan_spline_order": args.kan_spline_order if kan_impl_for_family(model_label, args.kan_impl) == "spline" else "none",
         "common_dims": "-".join(str(value) for value in common_dims),
         "group_dims": "-".join(str(value) for value in group_dims),
         "property_dims": "-".join(str(value) for value in property_dims),
@@ -1145,7 +1294,14 @@ def run_model(
         "params_after_prune": effective_params,
         "params_pruned": pruned_params,
         "params_pruned_pct": 100.0 * pruned_params / params if params else 0.0,
-        "prune_kan_fraction": args.prune_kan_fraction if model_label in ("fastkan", "spline") else 0.0,
+        "prune_kan_fraction": args.prune_kan_fraction if is_kan_family(model_label) else 0.0,
+        "prune_mode": args.prune_mode if is_kan_family(model_label) else "none",
+        "pruned_edges": pruning_masks.pruned_edges,
+        "total_kan_edges": pruning_masks.total_edges,
+        "prune_finetune_epochs": args.prune_finetune_epochs if is_kan_family(model_label) else 0,
+        "prune_finetune_seconds": prune_finetune_seconds,
+        "kan_l1_lambda": args.kan_l1_lambda if is_kan_family(model_label) else 0.0,
+        "activation": args.activation,
         "lr": args.lr,
         "weight_decay": args.weight_decay,
         "loss": args.loss,
@@ -1157,7 +1313,7 @@ def run_model(
         row[f"best_val_{metric_name}"] = value
     for metric_name, value in test_metrics.items():
         row[f"test_{metric_name}"] = value
-    if args.export_formulas and model_label in ("fastkan", "spline"):
+    if args.export_formulas and is_kan_family(model_label):
         formula_path = (
             Path(args.output_dir)
             / f"formula-{args.dataset}-fold{fold_data['metadata']['fold']}-{model_label}.txt"
@@ -1186,6 +1342,7 @@ def run_model(
     else:
         prediction_array = test_prediction.numpy().reshape(test_prediction.shape[0], -1)
         predictions = prediction_array[:, 0].tolist() if prediction_array.shape[1] == 1 else prediction_array.tolist()
+    pruning_masks.remove_hooks()
     return row, predictions
 
 
@@ -1392,6 +1549,109 @@ def finite_std(values: list[float]) -> float:
     return float(np.std(finite_values)) if finite_values else float("nan")
 
 
+def _flatten_formula_module(
+    name: str,
+    module: torch.nn.Module,
+) -> Iterable[tuple[str, torch.nn.Module]]:
+    # KAN layers contain implementation Linear modules; they are one logical
+    # operation and must not be traversed again or the exported equation is
+    # overwritten by duplicate internal layers.
+    if isinstance(
+        module,
+        (
+            FastKANLinear,
+            KANLinear,
+            torch.nn.Linear,
+            torch.nn.ReLU,
+            torch.nn.ELU,
+            torch.nn.SiLU,
+            torch.nn.LayerNorm,
+            torch.nn.BatchNorm1d,
+        ),
+    ):
+        yield name, module
+        return
+    for child_name, child in module.named_children():
+        full_name = f"{name}.{child_name}" if name else child_name
+        yield from _flatten_formula_module(full_name, child)
+
+
+def _formula_forward_modules(model: torch.nn.Module) -> Iterable[tuple[str, torch.nn.Module]]:
+    """Yield the actual single-property MODNet forward path in order."""
+
+    output_heads = getattr(model, "output_heads", None)
+    if output_heads is None or len(output_heads) != 1:
+        raise ValueError("Formula export currently requires one MODNet property head")
+    prop_key = next(iter(output_heads.keys()))
+    group_key = prop_key.split("_p", 1)[0]
+    path = (
+        ("common_block", model.common_block),
+        (f"group_blocks.{group_key}", model.group_blocks[group_key]),
+        (f"property_blocks.{prop_key}", model.property_blocks[prop_key]),
+        (f"target_blocks.{prop_key}", model.target_blocks[prop_key]),
+        (f"output_heads.{prop_key}", model.output_heads[prop_key]),
+    )
+    for name, module in path:
+        yield from _flatten_formula_module(name, module)
+
+
+def _activation_formula_lines(
+    name: str,
+    module: torch.nn.Module,
+    source_names: list[str],
+    output_names: list[str],
+    top_k: int,
+) -> list[str]:
+    lines = [f"  # {name}: {module.__class__.__name__}"]
+    if isinstance(module, torch.nn.ReLU):
+        lines.extend(
+            f"  {output} = relu({_source_name(source_names, idx)})"
+            for idx, output in enumerate(output_names)
+        )
+    elif isinstance(module, torch.nn.ELU):
+        lines.extend(
+            f"  {output} = elu({_source_name(source_names, idx)}; alpha={module.alpha:g})"
+            for idx, output in enumerate(output_names)
+        )
+    elif isinstance(module, torch.nn.SiLU):
+        lines.extend(
+            f"  {output} = silu({_source_name(source_names, idx)})"
+            for idx, output in enumerate(output_names)
+        )
+    elif isinstance(module, torch.nn.LayerNorm):
+        gamma = (
+            module.weight.detach().cpu().reshape(-1).tolist()
+            if module.elementwise_affine
+            else [1.0] * len(source_names)
+        )
+        beta = (
+            module.bias.detach().cpu().reshape(-1).tolist()
+            if module.elementwise_affine
+            else [0.0] * len(source_names)
+        )
+        vector = _compact_names(source_names)
+        for idx, output in enumerate(output_names):
+            lines.append(
+                f"  {output} = LayerNorm_{idx}({vector}; "
+                f"gamma={_format_number(float(gamma[idx]))}, "
+                f"beta={_format_number(float(beta[idx]))}, eps={module.eps:g})"
+            )
+    elif isinstance(module, torch.nn.BatchNorm1d):
+        mean = module.running_mean.detach().cpu()
+        var = module.running_var.detach().cpu()
+        gamma = module.weight.detach().cpu() if module.affine else torch.ones_like(mean)
+        beta = module.bias.detach().cpu() if module.affine else torch.zeros_like(mean)
+        for idx, output in enumerate(output_names):
+            scale = float(gamma[idx] / torch.sqrt(var[idx] + module.eps))
+            offset = float(beta[idx] - mean[idx] * scale)
+            lines.append(
+                f"  {output} = {_format_number(scale)}*{_source_name(source_names, idx)} "
+                f"+ {_format_number(offset)}"
+            )
+    lines.append("")
+    return lines
+
+
 def export_sparse_formula(
     model: torch.nn.Module,
     model_label: str,
@@ -1443,7 +1703,7 @@ def export_sparse_formula(
     lines.extend(_formula_metric_lines("test", test_metrics, task_type, target_names))
     lines.extend(
         [
-            "  note = metrics are computed from the pruned model represented by this formula.",
+            "  note = metrics are computed from the full pruned model; a top-k formula is a display-only truncation.",
             "  confidence_note = this is held-out performance and formula-fidelity, not calibrated uncertainty.",
             "",
         ]
@@ -1461,6 +1721,8 @@ def export_sparse_formula(
         [
             "",
             "Function definitions",
+            "  relu(x) = max(0, x)",
+            "  elu(x; alpha) = x if x > 0 else alpha*(exp(x)-1)",
             "  silu(x) = x / (1 + exp(-x))",
             "  rbf(x; c, h) = exp(-((x - c) / h)^2)",
             "  LayerNorm_i(v; gamma,beta,eps) = gamma_i * (v_i - mean(v)) / sqrt(var(v) + eps) + beta_i",
@@ -1470,14 +1732,29 @@ def export_sparse_formula(
         ]
     )
 
-    names_by_module: dict[str, list[str] | None] = {"": input_vars}
-    module_index = 0
+    formula_modules = list(_formula_forward_modules(model))
+    transform_indices = [
+        idx
+        for idx, (_, module) in enumerate(formula_modules)
+        if isinstance(module, (FastKANLinear, KANLinear, torch.nn.Linear))
+    ]
+    last_transform_index = transform_indices[-1] if transform_indices else -1
+    source_names = input_vars
     final_output_names: list[str] = []
     coverage_values: list[float] = []
-    for name, module in model.named_modules():
+    for module_index, (name, module) in enumerate(formula_modules):
+        is_final = module_index == last_transform_index
+        if is_final:
+            raw_name = "logit" if task_type == "classification" else "raw"
+            out_features = int(getattr(module, "out_features"))
+            output_names = [
+                f"{raw_name}_{safe_target_names[idx] if idx < len(safe_target_names) else f'{safe_target}_{idx}'}"
+                for idx in range(out_features)
+            ]
+        else:
+            width = int(getattr(module, "out_features", len(source_names)))
+            output_names = [f"z{module_index:02d}_{idx}" for idx in range(width)]
         if isinstance(module, FastKANLinear):
-            source_names = source_names_for(name, names_by_module, input_vars)
-            output_names = [f"z{module_index:02d}_{idx}" for idx in range(module.out_features)]
             lines.extend(
                 _fastkan_formula_lines(
                     name,
@@ -1490,11 +1767,7 @@ def export_sparse_formula(
                     coverage_values,
                 )
             )
-            remember_output_names(name, output_names, names_by_module)
-            module_index += 1
         elif isinstance(module, KANLinear):
-            source_names = source_names_for(name, names_by_module, input_vars)
-            output_names = [f"z{module_index:02d}_{idx}" for idx in range(module.out_features)]
             lines.extend(
                 _spline_formula_lines(
                     name,
@@ -1506,18 +1779,7 @@ def export_sparse_formula(
                     coverage_values,
                 )
             )
-            remember_output_names(name, output_names, names_by_module)
-            module_index += 1
-        elif isinstance(module, torch.nn.Linear) and name.startswith("output_heads."):
-            source_names = source_names_for(name, names_by_module, input_vars)
-            raw_name = "logit" if task_type == "classification" else "raw"
-            if module.out_features == 1:
-                output_names = [f"{raw_name}_{safe_target_names[0] if safe_target_names else safe_target}"]
-            else:
-                output_names = [
-                    f"{raw_name}_{safe_target_names[idx] if idx < len(safe_target_names) else f'{safe_target}_{idx}'}"
-                    for idx in range(module.out_features)
-                ]
+        elif isinstance(module, torch.nn.Linear):
             lines.extend(
                 _linear_formula_lines(
                     name,
@@ -1529,7 +1791,18 @@ def export_sparse_formula(
                     coverage_values,
                 )
             )
-            remember_output_names(name, output_names, names_by_module)
+        elif isinstance(
+            module,
+            (torch.nn.ReLU, torch.nn.ELU, torch.nn.SiLU, torch.nn.LayerNorm, torch.nn.BatchNorm1d),
+        ):
+            output_names = [f"z{module_index:02d}_{idx}" for idx in range(len(source_names))]
+            lines.extend(
+                _activation_formula_lines(name, module, source_names, output_names, top_k)
+            )
+        else:
+            continue
+        source_names = output_names
+        if is_final:
             final_output_names = output_names
 
     if final_output_names:
@@ -2075,9 +2348,17 @@ def ordered_fieldnames(rows: list[dict[str, Any]]) -> list[str]:
         "target_names",
         "n_targets",
         "model",
+        "architecture",
         "block_type",
+        "activation",
         "kan_impl",
         "prune_kan_fraction",
+        "prune_mode",
+        "pruned_edges",
+        "total_kan_edges",
+        "prune_finetune_epochs",
+        "prune_finetune_seconds",
+        "kan_l1_lambda",
         "params_before_prune",
         "params_after_prune",
         "params_pruned",
@@ -2121,6 +2402,12 @@ def ordered_fieldnames(rows: list[dict[str, Any]]) -> list[str]:
 
 def main() -> None:
     args = parse_args()
+    if not 0.0 <= args.prune_kan_fraction < 1.0:
+        raise ValueError("--prune-kan-fraction must be in [0, 1)")
+    if args.prune_finetune_epochs < 0:
+        raise ValueError("--prune-finetune-epochs must be non-negative")
+    if args.kan_l1_lambda < 0:
+        raise ValueError("--kan-l1-lambda must be non-negative")
     set_seed(args.seed)
     device = resolve_device(args)
     if device.type == "cuda":
@@ -2184,11 +2471,15 @@ def main() -> None:
         "summary": summary,
         "matbench_records": matbench_records,
     }
-    json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    with csv_path.open("w", newline="", encoding="utf-8") as file:
+    json_temp = json_path.with_suffix(json_path.suffix + ".tmp")
+    json_temp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    json_temp.replace(json_path)
+    csv_temp = csv_path.with_suffix(csv_path.suffix + ".tmp")
+    with csv_temp.open("w", newline="", encoding="utf-8") as file:
         writer = csv.DictWriter(file, fieldnames=ordered_fieldnames(rows))
         writer.writeheader()
         writer.writerows(rows)
+    csv_temp.replace(csv_path)
     print(f"\nWrote {json_path}")
     print(f"Wrote {csv_path}")
 

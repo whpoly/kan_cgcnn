@@ -2,11 +2,17 @@
 
 ## MODNet KAN Benchmark Quickstart
 
-This repo includes a descriptor-based benchmark for replacing MODNet's dense
-MLP hierarchy with KAN blocks while keeping the Matbench fold protocol. The
-runner compares `mlp`, `fastkan`, and `spline`, reports validation/test metrics,
-parameter counts before/after optional pruning, and can export sparse layerwise
-formula summaries for KAN models.
+This repo includes a descriptor-based benchmark that keeps MODNet's feature
+selection and hierarchical MLP trunk, then replaces the target predictor with
+a KAN. The recommended comparison is `mlp`, `hybrid-fastkan`, and
+`hybrid-spline`. `direct-fastkan`/`direct-spline` map selected physical
+descriptors directly to KAN for a more transparent ablation; `fastkan` and
+`spline` retain the older all-KAN ablation.
+
+KAN pruning is restricted to KAN edges: the shared MLP trunk is not pruned and
+the strongest incoming edge of every KAN output node is protected. Optional
+post-pruning fine-tuning keeps masks enforced. Hyperparameter selection uses an
+internal validation split, not the official Matbench test fold.
 
 Create the PyTorch/KAN environment:
 
@@ -21,7 +27,7 @@ Fast smoke test:
 python scripts\benchmark_modnet_kan.py `
   --dataset matbench_phonons `
   --folds 0 `
-  --models mlp fastkan `
+  --models mlp hybrid-fastkan direct-fastkan `
   --featurizer-preset pymatgen-composition `
   --n-features 64 `
   --epochs 20 `
@@ -36,53 +42,56 @@ Formula-export smoke test:
 python scripts\benchmark_modnet_kan.py `
   --dataset matbench_phonons `
   --folds 0 `
-  --models fastkan `
+  --models hybrid-fastkan `
   --featurizer-preset pymatgen-composition `
   --n-features 64 `
   --epochs 20 `
   --batch-size 64 `
   --prune-kan-fraction 0.3 `
+  --prune-mode edge `
+  --prune-finetune-epochs 10 `
   --export-formulas `
   --formula-top-k 20 `
   --device cuda `
   --output-dir benchmarks\modnet-kan-formulas
 ```
 
-For the stricter benchmark against official MODNet descriptors, the easiest
-remote setup is a single MODNet-compatible environment that also installs
-PyTorch/KAN:
+### Resumable Slurm arrays
+
+The recommended server workflow uses separate CPU and GPU arrays. Every
+official MODNet task runs in an isolated child process with a hard timeout,
+heartbeat/status file, retry with `n_jobs=1`, atomic fold exports, and resume
+support. A stuck task therefore cannot block the other datasets.
+
+Create the two environments once on the login node:
+
+```bash
+conda env create -f environment-modnet-v012.yml
+bash scripts/setup_conda_cuda.sh kan-cgcnn-cuda
+```
+
+Run the complete dependency pipeline:
 
 Linux/CUDA server:
 
 ```bash
-git clone https://github.com/<your-user>/<your-repo>.git
-cd <your-repo>
-mkdir -p job_logs
-sbatch scripts/slurm_modnet_kan_unified.sh
+bash scripts/submit_modnet_kan_pipeline.sh
 ```
 
-The SLURM script runs the full MODNet v0.1.12 Matbench benchmark: 13 original
-Matbench tasks represented as 12 benchmark entries, because
-`matbench_log_gvrh` and `matbench_log_kvrh` are trained together as the
-two-output `matbench_elastic` model. It creates the missing `modnet-kan` conda
-environment, exports official MODNet-selected descriptors, trains `mlp`,
-`fastkan`, and `spline` on those descriptors, prunes KAN parameters, and writes
-readable explicit formula files with held-out metrics.
-
-If your CUDA driver cannot use the default PyTorch CUDA 12.1 wheel, override
-the torch wheel before submitting:
+If the official MODNet run and `official_feature_folds/fold_0..4` exports
+already exist, submit only the GPU stage:
 
 ```bash
-TORCH_SPEC='torch==2.4.1+cu118' \
-TORCH_INDEX_URL='https://download.pytorch.org/whl/cu118' \
-sbatch scripts/slurm_modnet_kan_unified.sh
+OFFICIAL_OUTPUT_DIR=/absolute/path/to/official-run \
+KAN_OUTPUT_ROOT=/absolute/path/to/modnet-kan-results \
+sbatch scripts/slurm_modnet_kan_array.sh
 ```
 
-For a quicker debug run that skips the three large MP tasks:
-
-```bash
-TASK_SET=small sbatch scripts/slurm_modnet_kan_unified.sh
-```
+The path must contain
+`<task>/official_feature_folds/fold_<n>/metadata.json`. To rerun only one array
+entry, use for example `sbatch --array=9 scripts/slurm_modnet_kan_array.sh`
+(`9` is `matbench_phonons`). Completed tuning trials are reused with `--resume`;
+stalled trials are terminated after `TRIAL_TIMEOUT_MINUTES` (default 180).
 
 The default reliable tuning protocol is:
 
@@ -224,25 +233,23 @@ converted to tabular material features, a relevance-redundancy style selector
 chooses the top descriptors on the training split, and a dense hierarchy maps
 `features -> shared trunk -> property group -> property head -> output`.
 
-This repo now includes a PyTorch version of that hierarchy with the hidden dense
-blocks swapped for the in-repo KAN layers:
+This repo includes a PyTorch version with independently selectable block types.
+The recommended hybrid keeps the common/group/property MLP blocks and replaces
+the target predictor and output mapping with KAN:
 
 - model: `cgcnn_pyg_kan.modnet.MODNetKAN`
 - features/preprocessing: `cgcnn_pyg_kan.modnet_features`
 - Matbench runner: `scripts/benchmark_modnet_kan.py`
 
-To reproduce the official Matbench MODNet baseline, use a MODNet-compatible
-Python 3.8 environment. The recommended remote path is the unified
-`modnet-kan` environment, which keeps the old MODNet stack and adds only the
-PyTorch pieces needed by KAN:
+The resumable two-stage arrays described above are recommended. The older
+single-job unified environment remains available for compatibility:
 
 ```bash
 bash scripts/setup_conda_modnet_kan.sh modnet-kan
 sbatch scripts/slurm_modnet_kan_unified.sh
 ```
 
-The older two-environment wrapper is still available if you want to isolate
-TensorFlow/MODNet from PyTorch:
+The PowerShell two-environment wrapper is also available:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\run_modnet_kan_matbench.ps1
@@ -250,9 +257,8 @@ powershell -ExecutionPolicy Bypass -File scripts\run_modnet_kan_matbench.ps1
 
 The default task set is the full MODNet Matbench benchmark, with the
 `matbench_elastic` special case: `matbench_log_gvrh` and `matbench_log_kvrh`
-are trained as one two-output model. In unified mode, official MODNet and
-`mlp`/`fastkan`/`spline` all run inside `modnet-kan`. Use `--task-set small` or
-`TASK_SET=small` only for a faster debug run.
+are trained as one two-output model. The legacy unified mode runs official
+MODNet and the older model families inside `modnet-kan`.
 
 The official MODNet stage calls `modnet.matbench.benchmark.matbench_benchmark`
 with the documented Matbench settings: `EnsembleMODNetModel`,
@@ -289,7 +295,7 @@ conda activate kan-cgcnn-cuda
 python -u scripts\benchmark_modnet_kan.py `
   --dataset matbench_phonons `
   --folds 0 1 2 3 4 `
-  --models mlp fastkan spline `
+  --models mlp hybrid-fastkan hybrid-spline direct-fastkan `
   --precomputed-feature-dir benchmarks\official-modnet-v012-small\matbench_phonons\official_feature_folds `
   --n-features 512 `
   --common-dims 512 `
@@ -300,6 +306,8 @@ python -u scripts\benchmark_modnet_kan.py `
   --epochs 300 `
   --batch-size 64 `
   --prune-kan-fraction 0.5 `
+  --prune-mode edge `
+  --prune-finetune-epochs 20 `
   --export-formulas `
   --output-dir benchmarks\kan-on-official-modnet-features\matbench_phonons `
   --device cuda
@@ -311,7 +319,7 @@ Quick smoke run:
 python scripts/benchmark_modnet_kan.py `
   --dataset matbench_phonons `
   --folds 0 `
-  --models kan mlp `
+  --models hybrid-fastkan direct-fastkan mlp `
   --featurizer-preset pymatgen-composition `
   --n-features 64 `
   --epochs 20 `
@@ -325,7 +333,7 @@ Fuller descriptor run:
 python scripts/benchmark_modnet_kan.py `
   --dataset matbench_phonons `
   --folds 0 1 2 3 4 `
-  --models kan mlp `
+  --models hybrid-fastkan direct-fastkan mlp `
   --featurizer-preset auto `
   --n-features 256 `
   --common-dims 64 `
@@ -354,7 +362,7 @@ Parameter tuning plus Matbench-aligned final benchmark:
 ```powershell
 python scripts/tune_modnet_kan.py `
   --dataset matbench_phonons `
-  --model-families mlp fastkan spline `
+  --model-families mlp hybrid-fastkan hybrid-spline direct-fastkan `
   --tune-folds 0 1 `
   --final-folds 0 1 2 3 4 `
   --search-space random `
@@ -373,7 +381,10 @@ python scripts/tune_modnet_kan.py `
   --weight-decay-candidates 0 1e-6 1e-5 `
   --dropout-candidates 0 0.05 `
   --loss-candidates mae rmse `
-  --prune-kan-fraction-candidates 0 `
+  --prune-kan-fraction-candidates 0 0.3 0.5 `
+  --prune-mode edge `
+  --prune-finetune-epochs 20 `
+  --kan-l1-lambda 1e-5 `
   --target-scale none `
   --batch-size 64 `
   --val-ratio 0.1 `
@@ -417,7 +428,7 @@ Matbench-strict all-dataset run:
 
 ```powershell
 python scripts/tune_modnet_all_matbench.py `
-  --model-families mlp fastkan spline `
+  --model-families mlp hybrid-fastkan hybrid-spline `
   --tune-folds 0 1 `
   --final-folds 0 1 2 3 4 `
   --search-space random `

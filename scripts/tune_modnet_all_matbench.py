@@ -12,7 +12,16 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MODEL_FAMILIES = ["mlp", "fastkan", "spline"]
+MODEL_FAMILIES = [
+    "mlp",
+    "hybrid-fastkan",
+    "hybrid-spline",
+    "direct-fastkan",
+    "direct-spline",
+    "fastkan",
+    "spline",
+]
+DEFAULT_MODEL_FAMILIES = ["mlp", "hybrid-fastkan", "hybrid-spline"]
 TASK_TYPES = ["regression", "classification"]
 FEATURE_PRESETS = [
     "auto",
@@ -52,7 +61,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--task-types", nargs="+", choices=TASK_TYPES, default=TASK_TYPES)
     parser.add_argument("--max-samples", type=int, default=20000)
     parser.add_argument("--list-datasets", action="store_true")
-    parser.add_argument("--model-families", nargs="+", choices=MODEL_FAMILIES, default=MODEL_FAMILIES)
+    parser.add_argument(
+        "--model-families",
+        nargs="+",
+        choices=MODEL_FAMILIES,
+        default=DEFAULT_MODEL_FAMILIES,
+    )
     parser.add_argument("--tune-folds", type=int, nargs="+", default=[0, 1])
     parser.add_argument("--final-folds", type=int, nargs="+", default=[0, 1, 2, 3, 4])
     parser.add_argument("--search-space", choices=["compact", "random", "grid"], default="compact")
@@ -93,6 +107,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dropout-candidates", type=float, nargs="+", default=None)
     parser.add_argument("--loss-candidates", nargs="+", choices=["mae", "rmse", "mse", "bce"], default=["mae", "rmse"])
     parser.add_argument("--prune-kan-fraction-candidates", type=float, nargs="+", default=[0.0])
+    parser.add_argument("--prune-mode", choices=["edge", "parameter"], default="edge")
+    parser.add_argument("--prune-finetune-epochs", type=int, default=0)
+    parser.add_argument("--kan-l1-lambda", type=float, default=0.0)
+    parser.add_argument("--activation", choices=["relu", "elu", "silu"], default="elu")
+    parser.add_argument("--trial-timeout-minutes", type=float, default=180.0)
     parser.add_argument("--allow-kan-larger-than-mlp", action="store_true")
     parser.add_argument("--scaler", choices=["minmax", "standard", "none"], default="minmax")
     parser.add_argument("--target-scale", choices=["none", "standard"], default="none")
@@ -252,6 +271,16 @@ def build_tune_command(args: argparse.Namespace, dataset: str, output_dir: Path)
         args.device,
         "--log-every-epochs",
         str(args.log_every_epochs),
+        "--prune-mode",
+        args.prune_mode,
+        "--prune-finetune-epochs",
+        str(args.prune_finetune_epochs),
+        "--kan-l1-lambda",
+        str(args.kan_l1_lambda),
+        "--activation",
+        args.activation,
+        "--trial-timeout-minutes",
+        str(args.trial_timeout_minutes),
     ]
     extend_values(cmd, "--model-families", args.model_families)
     extend_values(cmd, "--tune-folds", args.tune_folds)
@@ -282,6 +311,10 @@ def build_tune_command(args: argparse.Namespace, dataset: str, output_dir: Path)
         cmd.append("--require-cuda")
     if args.skip_final:
         cmd.append("--skip-final")
+    if args.resume:
+        cmd.append("--resume")
+    if args.fail_fast:
+        cmd.append("--fail-fast")
     return cmd
 
 

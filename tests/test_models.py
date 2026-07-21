@@ -1,6 +1,7 @@
 import torch
 from torch_geometric.loader import DataLoader
 
+from cgcnn_pyg_kan.kan import FastKANLinear
 from cgcnn_pyg_kan.data import SyntheticConfig, make_synthetic_crystal_dataset
 from cgcnn_pyg_kan.materials import (
     CGCNN_ATOM_FEATURE_DIM,
@@ -8,9 +9,10 @@ from cgcnn_pyg_kan.materials import (
     StructureGraphConfig,
     structure_to_graph,
 )
-from cgcnn_pyg_kan.modnet import MODNetKAN
+from cgcnn_pyg_kan.modnet import IdentityBlock, MLPBlock, MODNetKAN
 from cgcnn_pyg_kan.modnet_features import MODNetFeatureProcessor, make_feature_frame
 from cgcnn_pyg_kan.model import CGCNN
+from cgcnn_pyg_kan.pruning import apply_kan_edge_pruning
 
 
 def test_cgcnn_conv_nets_forward() -> None:
@@ -171,6 +173,82 @@ def test_modnet_kan_multi_target_forward() -> None:
     assert output.shape == (3, 3)
     assert model.target_names == ["bulk_modulus", "shear_modulus", "poisson_ratio"]
     assert torch.isfinite(output).all()
+
+
+def test_modnet_hybrid_keeps_mlp_trunk_and_uses_kan_predictor() -> None:
+    model = MODNetKAN(
+        n_feat=6,
+        targets=[[["bulk_modulus", "shear_modulus"]]],
+        num_neurons=([10], [8], [4], []),
+        block_types=("mlp", "mlp", "mlp", "kan"),
+        output_head_type="kan",
+        mlp_activation="elu",
+        kan_impl="fastkan",
+        kan_grid_size=3,
+    )
+    output = model(torch.randn(3, 6))
+
+    assert output.shape == (3, 2)
+    assert isinstance(model.common_block, MLPBlock)
+    assert any(isinstance(module, torch.nn.ELU) for module in model.common_block.modules())
+    assert not any(isinstance(module, FastKANLinear) for module in model.common_block.modules())
+    assert any(isinstance(module, FastKANLinear) for module in model.output_heads.modules())
+
+
+def test_modnet_direct_kan_maps_descriptors_without_hidden_trunk() -> None:
+    model = MODNetKAN(
+        n_feat=5,
+        num_neurons=([], [], [], []),
+        block_types=("mlp", "mlp", "mlp", "kan"),
+        output_head_type="kan",
+        kan_impl="fastkan",
+        kan_grid_size=3,
+    )
+    output = model(torch.randn(4, 5))
+
+    assert output.shape == (4,)
+    assert isinstance(model.common_block, IdentityBlock)
+    assert any(isinstance(module, FastKANLinear) for module in model.output_heads.modules())
+
+
+def test_structured_kan_pruning_does_not_touch_mlp_trunk_and_keeps_connectivity() -> None:
+    torch.manual_seed(3)
+    model = MODNetKAN(
+        n_feat=6,
+        targets=[[["a", "b"]]],
+        num_neurons=([8], [6], [4], []),
+        block_types=("mlp", "mlp", "mlp", "kan"),
+        output_head_type="kan",
+        kan_impl="fastkan",
+        kan_grid_size=3,
+    )
+    trunk_before = {
+        name: parameter.detach().clone()
+        for name, parameter in model.named_parameters()
+        if name.startswith("common_block")
+    }
+    masks = apply_kan_edge_pruning(model, fraction=0.75)
+
+    assert masks.pruned_edges > 0
+    assert masks.pruned_parameters > 0
+    for name, before in trunk_before.items():
+        assert torch.equal(dict(model.named_parameters())[name], before)
+
+    head = next(module for module in model.output_heads.modules() if isinstance(module, FastKANLinear))
+    grids = int(head.rbf.grid.numel())
+    spline = head.spline_linear.weight.detach().view(head.out_features, head.in_features, grids)
+    base = head.base_linear.weight.detach() if head.base_linear is not None else 0
+    live_edges = spline.abs().sum(dim=-1) + torch.as_tensor(base).abs()
+    assert torch.all(torch.count_nonzero(live_edges, dim=1) >= 1)
+
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-2)
+    loss = model(torch.randn(4, 6)).square().mean()
+    loss.backward()
+    optimizer.step()
+    masks.enforce()
+    for parameter, mask in masks.masks:
+        assert torch.count_nonzero(parameter.detach()[~mask]) == 0
+    masks.remove_hooks()
 
 
 def test_modnet_feature_processor_selects_and_transforms() -> None:

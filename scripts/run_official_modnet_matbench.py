@@ -7,10 +7,26 @@ import inspect
 import json
 import os
 import pickle
+import signal
+import subprocess
+import sys
 import time
 from pathlib import Path
-from traceback import print_exc
 from typing import Any
+
+# Set native-library limits before NumPy, TensorFlow, matminer, or MODNet are
+# imported. Setting these after importing TensorFlow is too late and can cause
+# severe oversubscription in nested Matbench/feature-selection jobs.
+for _thread_env_name in (
+    "OPENBLAS_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "OMP_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+    "TF_NUM_INTRAOP_THREADS",
+    "TF_NUM_INTEROP_THREADS",
+):
+    os.environ[_thread_env_name] = os.environ.get("MODNET_THREADS_PER_PROCESS", "1")
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "-1")
 
 import numpy as np
 import pandas as pd
@@ -102,6 +118,21 @@ def parse_args() -> argparse.Namespace:
         help="Maximum ranked official MODNet descriptors to export per fold; 0 exports all.",
     )
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--task-timeout-minutes",
+        type=float,
+        default=1440.0,
+        help="Hard timeout for each isolated task; 0 disables the timeout.",
+    )
+    parser.add_argument("--heartbeat-seconds", type=float, default=60.0)
+    parser.add_argument("--max-task-attempts", type=int, default=2)
+    parser.add_argument(
+        "--retry-n-jobs",
+        type=int,
+        default=1,
+        help="Use this safer worker count after an isolated task fails or times out.",
+    )
+    parser.add_argument("--worker-task", default=None, help=argparse.SUPPRESS)
     return parser.parse_args()
 
 
@@ -139,6 +170,8 @@ def normalize_task(task: str) -> str:
 
 
 def selected_tasks(args: argparse.Namespace) -> list[str]:
+    if args.worker_task:
+        return [normalize_task(args.worker_task)]
     if args.tasks:
         return [normalize_task(task) for task in args.tasks]
     return list(MATBENCH_TASKS if args.task_set == "all" else SMALL_MATBENCH_TASKS)
@@ -153,13 +186,44 @@ def task_outputs_complete(output_dir: Path, task: str, require_feature_folds: bo
     feature_dir = task_dir / "official_feature_folds"
     for fold in range(5):
         fold_dir = feature_dir / f"fold_{fold}"
-        if not (
-            (fold_dir / "train_features.csv.gz").exists()
-            and (fold_dir / "test_features.csv.gz").exists()
-            and (fold_dir / "feature_order.json").exists()
-        ):
+        required = (
+            fold_dir / "train_features.csv.gz",
+            fold_dir / "test_features.csv.gz",
+            fold_dir / "train_targets.csv.gz",
+            fold_dir / "test_targets.csv.gz",
+            fold_dir / "feature_order.json",
+            fold_dir / "metadata.json",
+        )
+        if not all(path.exists() and path.stat().st_size > 0 for path in required):
             return False
     return True
+
+
+def atomic_write_json(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    os.replace(temp_path, path)
+
+
+def write_task_status(task_dir: Path, task: str, stage: str, **details: Any) -> None:
+    atomic_write_json(
+        task_dir / "STATUS.json",
+        {
+            "task": task,
+            "stage": stage,
+            "pid": os.getpid(),
+            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            **details,
+        },
+    )
+
+
+def atomic_dataframe_csv(frame: pd.DataFrame, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    frame.to_csv(temp_path, compression="gzip")
+    os.replace(temp_path, path)
 
 
 def sanitize_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -193,16 +257,24 @@ def load_or_featurize(
     cache_dir.mkdir(parents=True, exist_ok=True)
     cache_path = cache_dir / f"{task}_moddata.pkl.gz"
     if cache_path.exists() and not force_featurize:
-        data = MODData.load(cache_path)
-        targets = data.df_targets.copy()
-        return data, {
-            "task": task,
-            "target_names": list(targets.columns),
-            "classification": task in CLASSIFICATION_TASKS,
-            "source_tasks": list(ELASTIC_TARGET_TASKS) if task == ELASTIC_MULTITASK_TASK else [task],
-            "cache_path": str(cache_path),
-            "loaded_from_cache": True,
-        }
+        try:
+            data = MODData.load(cache_path)
+        except Exception as exc:
+            print(
+                f"Ignoring unreadable featurization cache {cache_path}: "
+                f"{type(exc).__name__}: {exc}",
+                flush=True,
+            )
+        else:
+            targets = data.df_targets.copy()
+            return data, {
+                "task": task,
+                "target_names": list(targets.columns),
+                "classification": task in CLASSIFICATION_TASKS,
+                "source_tasks": list(ELASTIC_TARGET_TASKS) if task == ELASTIC_MULTITASK_TASK else [task],
+                "cache_path": str(cache_path),
+                "loaded_from_cache": True,
+            }
 
     df = load_elastic_multitask_dataframe() if task == ELASTIC_MULTITASK_TASK else sanitize_columns(load_dataset(task))
     target_names = [
@@ -408,10 +480,12 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = list(dict.fromkeys(key for row in rows for key in row))
-    with path.open("w", newline="", encoding="utf-8") as handle:
+    temp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    with temp_path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
+    os.replace(temp_path, path)
 
 
 def save_results_pickle(path: Path, results: dict[str, Any], include_models: bool) -> None:
@@ -429,8 +503,10 @@ def save_results_pickle(path: Path, results: dict[str, Any], include_models: boo
     payload = {key: results[key] for key in safe_keys if key in results}
     if include_models and "model" in results:
         payload["model"] = results["model"]
-    with gzip.open(path, "wb") as handle:
+    temp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    with gzip.open(temp_path, "wb") as handle:
         pickle.dump(payload, handle)
+    os.replace(temp_path, path)
 
 
 def export_feature_folds(
@@ -451,11 +527,34 @@ def export_feature_folds(
     for fold, (train_idx, test_idx) in enumerate(
         matbench_kfold_splits(data, classification=classification)
     ):
+        fold_dir = export_dir / f"fold_{fold}"
+        complete_paths = (
+            fold_dir / "train_features.csv.gz",
+            fold_dir / "test_features.csv.gz",
+            fold_dir / "train_targets.csv.gz",
+            fold_dir / "test_targets.csv.gz",
+            fold_dir / "feature_order.json",
+            fold_dir / "metadata.json",
+        )
+        if all(path.exists() and path.stat().st_size > 0 for path in complete_paths):
+            print(f"Feature fold {fold} already complete; reusing it.", flush=True)
+            continue
+        write_task_status(task_dir, task, "feature_selection", fold=fold)
         train_data, test_data = data.split((train_idx, test_idx))
         saved_train = task_dir / "folds" / f"train_moddata_f{fold + 1}"
+        loaded_saved_train = False
         if saved_train.exists():
-            train_data = MODData.load(saved_train)
-        elif inner_feat_selection:
+            try:
+                train_data = MODData.load(saved_train)
+            except Exception as exc:
+                print(
+                    f"Ignoring unreadable saved fold {saved_train}: "
+                    f"{type(exc).__name__}: {exc}",
+                    flush=True,
+                )
+            else:
+                loaded_saved_train = True
+        if not loaded_saved_train and inner_feat_selection:
             train_data.feature_selection(
                 n=-1,
                 use_precomputed_cross_nmi=use_precomputed_cross_nmi,
@@ -469,34 +568,28 @@ def export_feature_folds(
         )
         limit = len(feature_order) if max_features <= 0 else min(max_features, len(feature_order))
         selected = feature_order[:limit]
-        fold_dir = export_dir / f"fold_{fold}"
         fold_dir.mkdir(parents=True, exist_ok=True)
-        train_data.df_featurized.reindex(columns=selected).to_csv(
+        atomic_dataframe_csv(
+            train_data.df_featurized.reindex(columns=selected),
             fold_dir / "train_features.csv.gz",
-            compression="gzip",
         )
-        test_data.df_featurized.reindex(columns=selected).to_csv(
+        atomic_dataframe_csv(
+            test_data.df_featurized.reindex(columns=selected),
             fold_dir / "test_features.csv.gz",
-            compression="gzip",
         )
-        train_data.df_targets.to_csv(fold_dir / "train_targets.csv.gz", compression="gzip")
-        test_data.df_targets.to_csv(fold_dir / "test_targets.csv.gz", compression="gzip")
-        (fold_dir / "feature_order.json").write_text(
-            json.dumps(selected, indent=2),
-            encoding="utf-8",
-        )
-        (fold_dir / "metadata.json").write_text(
-            json.dumps(
-                {
-                    "task": task,
-                    "fold": fold,
-                    "classification": classification,
-                    "n_features_exported": len(selected),
-                    "source": "official MODNet v0.1.12 feature_selection",
-                },
-                indent=2,
-            ),
-            encoding="utf-8",
+        atomic_dataframe_csv(train_data.df_targets, fold_dir / "train_targets.csv.gz")
+        atomic_dataframe_csv(test_data.df_targets, fold_dir / "test_targets.csv.gz")
+        atomic_write_json(fold_dir / "feature_order.json", selected)
+        # Metadata is written last and therefore acts as the fold completion marker.
+        atomic_write_json(
+            fold_dir / "metadata.json",
+            {
+                "task": task,
+                "fold": fold,
+                "classification": classification,
+                "n_features_exported": len(selected),
+                "source": "official MODNet v0.1.12 feature_selection",
+            },
         )
     return export_dir
 
@@ -507,6 +600,7 @@ def run_task(args: argparse.Namespace, task: str, output_dir: Path) -> dict[str,
     cache_dir = Path(args.cache_dir) if args.cache_dir else task_dir / "precomputed"
     cache_dir = cache_dir.resolve()
     start = time.perf_counter()
+    write_task_status(task_dir, task, "featurization", n_jobs=args.n_jobs)
     data, metadata = load_or_featurize(
         task,
         cache_dir=cache_dir,
@@ -534,7 +628,21 @@ def run_task(args: argparse.Namespace, task: str, output_dir: Path) -> dict[str,
     results: dict[str, Any] | None = None
     try:
         os.chdir(task_dir)
-        if not args.skip_benchmark:
+        existing_summary_path = task_dir / f"official-modnet-summary-{task}.json"
+        existing_benchmark_paths = (
+            existing_summary_path,
+            task_dir / f"official-modnet-fold-results-{task}.csv",
+            task_dir / f"official-modnet-results-{task}.pkl.gz",
+        )
+        reuse_existing_benchmark = args.skip_existing and all(
+            path.exists() and path.stat().st_size > 0 for path in existing_benchmark_paths
+        )
+        if reuse_existing_benchmark and not args.skip_benchmark:
+            summary = json.loads(existing_summary_path.read_text(encoding="utf-8"))
+            summary["reused_existing_benchmark"] = True
+            print("Official benchmark outputs already complete; exporting missing folds only.", flush=True)
+        elif not args.skip_benchmark:
+            write_task_status(task_dir, task, "official_benchmark", n_jobs=args.n_jobs)
             results = run_official_benchmark(
                 data,
                 classification=bool(metadata["classification"]),
@@ -555,10 +663,7 @@ def run_task(args: argparse.Namespace, task: str, output_dir: Path) -> dict[str,
             )
             write_csv(task_dir / f"official-modnet-fold-results-{task}.csv", fold_rows)
             write_csv(task_dir / f"official-modnet-summary-{task}.csv", [summary])
-            (task_dir / f"official-modnet-summary-{task}.json").write_text(
-                json.dumps(summary, indent=2),
-                encoding="utf-8",
-            )
+            atomic_write_json(task_dir / f"official-modnet-summary-{task}.json", summary)
             save_results_pickle(
                 task_dir / f"official-modnet-results-{task}.pkl.gz",
                 results,
@@ -573,6 +678,7 @@ def run_task(args: argparse.Namespace, task: str, output_dir: Path) -> dict[str,
             }
 
         if args.export_feature_folds:
+            write_task_status(task_dir, task, "feature_export", n_jobs=args.n_jobs)
             feature_dir = export_feature_folds(
                 data,
                 task_dir=task_dir,
@@ -589,11 +695,153 @@ def run_task(args: argparse.Namespace, task: str, output_dir: Path) -> dict[str,
         os.chdir(old_cwd)
 
     metadata.update(summary)
-    (task_dir / "official-modnet-run-metadata.json").write_text(
-        json.dumps(metadata, indent=2),
-        encoding="utf-8",
+    atomic_write_json(task_dir / "official-modnet-run-metadata.json", metadata)
+    write_task_status(
+        task_dir,
+        task,
+        "complete",
+        seconds=time.perf_counter() - start,
     )
     return metadata
+
+
+def terminate_process_tree(process: subprocess.Popen[Any]) -> None:
+    if process.poll() is not None:
+        return
+    if os.name == "posix":
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+    else:
+        process.terminate()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        if os.name == "posix":
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        else:
+            process.kill()
+        process.wait()
+
+
+def worker_command(
+    args: argparse.Namespace,
+    task: str,
+    output_dir: Path,
+    n_jobs: int,
+) -> list[str]:
+    # Appending repeated scalar options is intentional: argparse uses the last
+    # value, so the resolved output directory and safe retry worker count win.
+    return [
+        sys.executable,
+        "-u",
+        str(Path(__file__).resolve()),
+        *sys.argv[1:],
+        "--worker-task",
+        task,
+        "--output-dir",
+        str(output_dir),
+        "--n-jobs",
+        str(n_jobs),
+    ]
+
+
+def status_stage(task_dir: Path) -> str:
+    status_path = task_dir / "STATUS.json"
+    if not status_path.exists():
+        return "starting"
+    try:
+        payload = json.loads(status_path.read_text(encoding="utf-8"))
+        fold = payload.get("fold")
+        return f"{payload.get('stage', 'unknown')}" + (f" fold={fold}" if fold is not None else "")
+    except (OSError, ValueError):
+        return "status-unreadable"
+
+
+def run_isolated_task(
+    args: argparse.Namespace,
+    task: str,
+    output_dir: Path,
+) -> dict[str, Any]:
+    task_dir = output_dir / task
+    attempts = max(1, int(args.max_task_attempts))
+    failures: list[dict[str, Any]] = []
+    for attempt in range(1, attempts + 1):
+        if task_outputs_complete(output_dir, task, require_feature_folds=args.export_feature_folds):
+            return json.loads(
+                (task_dir / "official-modnet-run-metadata.json").read_text(encoding="utf-8")
+            )
+        n_jobs = args.n_jobs if attempt == 1 else max(1, int(args.retry_n_jobs))
+        cmd = worker_command(args, task, output_dir, n_jobs=n_jobs)
+        print(
+            f"Starting isolated task {task}, attempt {attempt}/{attempts}, n_jobs={n_jobs}",
+            flush=True,
+        )
+        popen_kwargs: dict[str, Any] = {}
+        if os.name == "posix":
+            popen_kwargs["start_new_session"] = True
+        elif hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP"):
+            popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        process = subprocess.Popen(cmd, **popen_kwargs)
+        started = time.monotonic()
+        heartbeat = max(1.0, float(args.heartbeat_seconds))
+        timeout_seconds = (
+            float(args.task_timeout_minutes) * 60
+            if args.task_timeout_minutes > 0
+            else None
+        )
+        timed_out = False
+        try:
+            while True:
+                try:
+                    return_code = process.wait(timeout=heartbeat)
+                    break
+                except subprocess.TimeoutExpired:
+                    elapsed = time.monotonic() - started
+                    print(
+                        f"[heartbeat] task={task} attempt={attempt} "
+                        f"elapsed_min={elapsed / 60:.1f} stage={status_stage(task_dir)}",
+                        flush=True,
+                    )
+                    if timeout_seconds is not None and elapsed >= timeout_seconds:
+                        timed_out = True
+                        terminate_process_tree(process)
+                        return_code = process.returncode if process.returncode is not None else -9
+                        break
+        except KeyboardInterrupt:
+            terminate_process_tree(process)
+            raise
+
+        failure = {
+            "task": task,
+            "attempt": attempt,
+            "n_jobs": n_jobs,
+            "timed_out": timed_out,
+            "return_code": return_code,
+            "stage": status_stage(task_dir),
+            "elapsed_seconds": time.monotonic() - started,
+        }
+        failures.append(failure)
+        write_task_status(
+            task_dir,
+            task,
+            "retry_pending",
+            **{key: value for key, value in failure.items() if key not in {"task", "stage"}},
+        )
+        print(f"Isolated task failed: {json.dumps(failure)}", flush=True)
+
+    failure_summary = {
+        "task": task,
+        "failed": True,
+        "attempts": failures,
+    }
+    atomic_write_json(task_dir / "FAILED.json", failure_summary)
+    write_task_status(task_dir, task, "failed", attempts=failures)
+    return failure_summary
 
 
 def main() -> None:
@@ -609,32 +857,48 @@ def main() -> None:
     if args.dry_run:
         return
 
-    require_official_modnet()
     setup_threading()
     output_dir.mkdir(parents=True, exist_ok=True)
+    if args.worker_task:
+        require_official_modnet()
+        task = normalize_task(args.worker_task)
+        try:
+            summary = run_task(args, task, output_dir)
+        except Exception as exc:
+            write_task_status(
+                output_dir / task,
+                task,
+                "failed",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            raise
+        print(json.dumps(summary, indent=2), flush=True)
+        return
+
     summaries = []
+    failed = False
     for task in tasks:
         print(f"\n=== Official MODNet v0.1.12: {task} ===", flush=True)
-        try:
-            if args.skip_existing and task_outputs_complete(
-                output_dir, task, require_feature_folds=args.export_feature_folds
-            ):
-                metadata_path = output_dir / task / "official-modnet-run-metadata.json"
-                summary = json.loads(metadata_path.read_text(encoding="utf-8"))
-                summary["skipped_existing"] = True
-                summaries.append(summary)
-                print(json.dumps(summary, indent=2), flush=True)
-                continue
-            summary = run_task(args, task, output_dir)
+        if args.skip_existing and task_outputs_complete(
+            output_dir, task, require_feature_folds=args.export_feature_folds
+        ):
+            metadata_path = output_dir / task / "official-modnet-run-metadata.json"
+            summary = json.loads(metadata_path.read_text(encoding="utf-8"))
+            summary["skipped_existing"] = True
             summaries.append(summary)
             print(json.dumps(summary, indent=2), flush=True)
-        except Exception:
-            print_exc()
-            summaries.append({"task": task, "failed": True})
+            continue
+        summary = run_isolated_task(args, task, output_dir)
+        summaries.append(summary)
+        failed = failed or bool(summary.get("failed"))
+        print(json.dumps(summary, indent=2), flush=True)
     write_csv(output_dir / "official-modnet-all-summary.csv", summaries)
     with gzip.open(output_dir / "official-modnet-all-summary.json.gz", "wt", encoding="utf-8") as handle:
         json.dump(summaries, handle, indent=2)
     print(f"\nWrote {output_dir / 'official-modnet-all-summary.csv'}", flush=True)
+    if failed:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

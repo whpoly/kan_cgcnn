@@ -9,6 +9,9 @@ from torch import nn
 from .kan import make_kan_mlp
 
 TargetHierarchy = Sequence[Sequence[Sequence[str]]]
+BlockType = Literal["kan", "mlp"]
+HeadType = Literal["linear", "kan"]
+ActivationName = Literal["relu", "elu", "silu"]
 
 
 def flatten_targets(targets: TargetHierarchy) -> list[str]:
@@ -35,6 +38,20 @@ def _normalize_num_neurons(
     if len(num_neurons) != 4:
         raise ValueError("num_neurons must contain four blocks: common, group, property, target")
     return tuple(_as_dim_list(block) for block in num_neurons)  # type: ignore[return-value]
+
+
+def _normalize_block_types(
+    block_type: BlockType,
+    block_types: Sequence[BlockType] | None,
+) -> tuple[BlockType, BlockType, BlockType, BlockType]:
+    if block_types is None:
+        return (block_type, block_type, block_type, block_type)
+    if len(block_types) != 4:
+        raise ValueError("block_types must contain common, group, property, and target types")
+    normalized = tuple(block_types)
+    if any(value not in ("mlp", "kan") for value in normalized):
+        raise ValueError("each block type must be 'mlp' or 'kan'")
+    return normalized  # type: ignore[return-value]
 
 
 class IdentityBlock(nn.Module):
@@ -81,6 +98,7 @@ def _make_block(
     kan_spline_order: int,
     dropout: float,
     batch_norm: bool,
+    mlp_activation: type[nn.Module],
 ) -> nn.Module:
     hidden_dims = list(hidden_dims)
     if not hidden_dims:
@@ -103,19 +121,55 @@ def _make_block(
         return MLPBlock(
             in_dim,
             hidden_dims,
-            activation=nn.ReLU,
+            activation=mlp_activation,
             dropout=dropout,
             batch_norm=batch_norm,
         )
     raise ValueError(f"unsupported block_type {block_type!r}; expected 'kan' or 'mlp'")
 
 
+def _activation_type(name: ActivationName) -> type[nn.Module]:
+    activations: dict[str, type[nn.Module]] = {
+        "relu": nn.ReLU,
+        "elu": nn.ELU,
+        "silu": nn.SiLU,
+    }
+    try:
+        return activations[name]
+    except KeyError as exc:
+        raise ValueError(f"unsupported MLP activation {name!r}") from exc
+
+
+def _make_output_head(
+    in_dim: int,
+    out_dim: int,
+    head_type: HeadType,
+    kan_impl: Literal["spline", "fastkan"],
+    kan_grid_size: int,
+    kan_spline_order: int,
+) -> nn.Module:
+    if head_type == "linear":
+        return nn.Linear(in_dim, out_dim)
+    if head_type == "kan":
+        return make_kan_mlp(
+            in_dim,
+            [],
+            out_dim,
+            impl=kan_impl,
+            grid_size=kan_grid_size,
+            spline_order=kan_spline_order,
+        )
+    raise ValueError(f"unsupported output_head_type {head_type!r}")
+
+
 class MODNetKAN(nn.Module):
-    """PyTorch MODNet-style hierarchy with KAN or MLP hidden blocks.
+    """PyTorch MODNet hierarchy with independently selectable block types.
 
     MODNet uses a shared dense trunk, group-specific branches, and
-    property-specific outputs over material descriptors. This module keeps that
-    hierarchy while swapping hidden dense blocks for the in-repo KAN layers.
+    property-specific outputs over material descriptors. ``block_types`` makes
+    it possible to retain the MODNet MLP trunk while replacing only the
+    target-specific predictor with a KAN. A KAN output head is used in the
+    hybrid setup so an empty target block still contains a real KAN mapping.
     """
 
     def __init__(
@@ -123,7 +177,10 @@ class MODNetKAN(nn.Module):
         n_feat: int,
         targets: TargetHierarchy | None = None,
         num_neurons: Sequence[Sequence[int] | int | None] | None = None,
-        block_type: Literal["kan", "mlp"] = "kan",
+        block_type: BlockType = "kan",
+        block_types: Sequence[BlockType] | None = None,
+        output_head_type: HeadType = "linear",
+        mlp_activation: ActivationName = "relu",
         kan_impl: Literal["spline", "fastkan"] = "fastkan",
         kan_grid_size: int = 5,
         kan_spline_order: int = 3,
@@ -142,21 +199,27 @@ class MODNetKAN(nn.Module):
 
         self.num_neurons = _normalize_num_neurons(num_neurons)
         self.block_type = block_type
+        self.block_types = _normalize_block_types(block_type, block_types)
+        self.output_head_type = output_head_type
+        self.mlp_activation = mlp_activation
         self.kan_impl = kan_impl
         self.squeeze_single_target = squeeze_single_target
         self._multi_target = len(self.target_names) > 1
         use_batch_norm = batch_norm_multi_target and self._multi_target
 
         common_dims, group_dims, property_dims, target_dims = self.num_neurons
+        common_type, group_type, property_type, target_type = self.block_types
+        mlp_activation_type = _activation_type(mlp_activation)
         self.common_block = _make_block(
             n_feat,
             common_dims,
-            block_type,
+            common_type,
             kan_impl,
             kan_grid_size,
             kan_spline_order,
             dropout,
             use_batch_norm,
+            mlp_activation_type,
         )
         common_out_dim = int(self.common_block.out_dim)  # type: ignore[attr-defined]
 
@@ -172,12 +235,13 @@ class MODNetKAN(nn.Module):
             group_block = _make_block(
                 common_out_dim,
                 group_dims,
-                block_type,
+                group_type,
                 kan_impl,
                 kan_grid_size,
                 kan_spline_order,
                 dropout,
                 use_batch_norm,
+                mlp_activation_type,
             )
             self.group_blocks[group_key] = group_block
             group_out_dim = int(group_block.out_dim)  # type: ignore[attr-defined]
@@ -189,12 +253,13 @@ class MODNetKAN(nn.Module):
                 prop_block = _make_block(
                     group_out_dim,
                     property_dims,
-                    block_type,
+                    property_type,
                     kan_impl,
                     kan_grid_size,
                     kan_spline_order,
                     dropout,
                     use_batch_norm,
+                    mlp_activation_type,
                 )
                 self.property_blocks[prop_key] = prop_block
                 prop_out_dim = int(prop_block.out_dim)  # type: ignore[attr-defined]
@@ -202,16 +267,24 @@ class MODNetKAN(nn.Module):
                 target_block = _make_block(
                     prop_out_dim,
                     target_dims,
-                    block_type,
+                    target_type,
                     kan_impl,
                     kan_grid_size,
                     kan_spline_order,
                     dropout,
                     use_batch_norm,
+                    mlp_activation_type,
                 )
                 self.target_blocks[prop_key] = target_block
                 target_out_dim = int(target_block.out_dim)  # type: ignore[attr-defined]
-                self.output_heads[prop_key] = nn.Linear(target_out_dim, len(prop_targets))
+                self.output_heads[prop_key] = _make_output_head(
+                    target_out_dim,
+                    len(prop_targets),
+                    output_head_type,
+                    kan_impl,
+                    kan_grid_size,
+                    kan_spline_order,
+                )
                 self.output_slices[prop_key] = (cursor, cursor + len(prop_targets))
                 cursor += len(prop_targets)
 

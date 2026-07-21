@@ -5,7 +5,9 @@ import csv
 import itertools
 import json
 import math
+import os
 import random
+import signal
 import subprocess
 import sys
 import time
@@ -22,7 +24,16 @@ FEATURE_PRESETS = [
     "matminer-composition",
     "matminer-structure-lite",
 ]
-MODEL_FAMILIES = ["mlp", "fastkan", "spline"]
+MODEL_FAMILIES = [
+    "mlp",
+    "hybrid-fastkan",
+    "hybrid-spline",
+    "direct-fastkan",
+    "direct-spline",
+    "fastkan",
+    "spline",
+]
+DEFAULT_MODEL_FAMILIES = ["mlp", "hybrid-fastkan", "hybrid-spline"]
 TASK_TYPES = ("regression", "classification")
 METRIC_NAMES = [
     "mae",
@@ -50,12 +61,17 @@ MAXIMIZE_METRICS = {
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Tune MODNet-style MLP, FastKAN, and B-spline KAN hyperparameters, "
+            "Tune MODNet MLP baselines and hybrid/direct KAN predictors, "
             "then run Matbench-aligned final benchmarks."
         )
     )
     parser.add_argument("--dataset", default="matbench_phonons")
-    parser.add_argument("--model-families", nargs="+", choices=MODEL_FAMILIES, default=MODEL_FAMILIES)
+    parser.add_argument(
+        "--model-families",
+        nargs="+",
+        choices=MODEL_FAMILIES,
+        default=DEFAULT_MODEL_FAMILIES,
+    )
     parser.add_argument("--tune-folds", type=int, nargs="+", default=[0, 1])
     parser.add_argument("--final-folds", type=int, nargs="+", default=[0, 1, 2, 3, 4])
     parser.add_argument("--search-space", choices=["compact", "random", "grid"], default="compact")
@@ -120,6 +136,15 @@ def parse_args() -> argparse.Namespace:
         default=["mae", "rmse"],
     )
     parser.add_argument("--prune-kan-fraction-candidates", type=float, nargs="+", default=[0.0])
+    parser.add_argument("--prune-mode", choices=["edge", "parameter"], default="edge")
+    parser.add_argument("--prune-finetune-epochs", type=int, default=0)
+    parser.add_argument("--kan-l1-lambda", type=float, default=0.0)
+    parser.add_argument(
+        "--activation",
+        choices=["relu", "elu", "silu"],
+        default="elu",
+        help="MLP trunk activation; ELU matches official MODNet Matbench runs.",
+    )
     parser.add_argument(
         "--allow-kan-larger-than-mlp",
         action="store_true",
@@ -161,6 +186,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--formula-top-k", type=int, default=40)
     parser.add_argument("--formula-min-abs", type=float, default=0.0)
     parser.add_argument("--skip-final", action="store_true")
+    parser.add_argument(
+        "--trial-timeout-minutes",
+        type=float,
+        default=180.0,
+        help="Kill a stalled tuning/final subprocess after this many minutes; 0 disables it.",
+    )
+    parser.add_argument("--resume", action="store_true", help="Reuse completed trial JSON files.")
+    parser.add_argument("--fail-fast", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
@@ -217,6 +250,34 @@ def candidate_space(args: argparse.Namespace, family: str) -> dict[str, list[Any
             "dropout": [0.0, 0.05],
             "prune_kan_fraction": [0.0],
         }
+    elif family.startswith("hybrid-"):
+        defaults = {
+            "n_features": [128, 256, 512],
+            "common_dim": [128, 256],
+            "group_dim": [64, 128],
+            "property_dim": [16, 32, 64],
+            "target_dim": [0, 8, 16],
+            "kan_grid_size": [3, 5],
+            "kan_spline_order": [3],
+            "lr": [3e-4, 1e-3, 2e-3],
+            "weight_decay": [0.0, 1e-6],
+            "dropout": [0.0, 0.05],
+            "prune_kan_fraction": [0.3, 0.5],
+        }
+    elif family.startswith("direct-"):
+        defaults = {
+            "n_features": [16, 32, 64],
+            "common_dim": [0],
+            "group_dim": [0],
+            "property_dim": [0],
+            "target_dim": [0, 8, 16],
+            "kan_grid_size": [3, 5],
+            "kan_spline_order": [3],
+            "lr": [3e-4, 1e-3, 2e-3],
+            "weight_decay": [0.0, 1e-6],
+            "dropout": [0.0],
+            "prune_kan_fraction": [0.3, 0.5],
+        }
     else:
         defaults = {
             "n_features": [128, 256, 512],
@@ -258,6 +319,9 @@ def make_trials(args: argparse.Namespace) -> list[dict[str, Any]]:
             family_trials = compact_trials(args, family)
         if args.max_trials_per_family is not None:
             family_trials = family_trials[: args.max_trials_per_family]
+        for trial in family_trials:
+            trial["activation"] = args.activation
+            trial["trial_id"] = f"{trial['trial_id']}_act{args.activation}"
         trials.extend(family_trials)
     return trials
 
@@ -315,7 +379,7 @@ def random_trials(args: argparse.Namespace, family: str) -> list[dict[str, Any]]
 def grid_trials(args: argparse.Namespace, family: str) -> list[dict[str, Any]]:
     space = candidate_space(args, family)
     grid_sizes = [0] if family == "mlp" else space["kan_grid_size"]
-    spline_orders = [0] if family != "spline" else space["kan_spline_order"]
+    spline_orders = [0] if not family.endswith("spline") else space["kan_spline_order"]
     return [
         make_trial(family, *spec)
         for spec in itertools.product(
@@ -351,7 +415,7 @@ def make_trial(
     prune_kan_fraction: float,
 ) -> dict[str, Any]:
     grid_part = "mlp" if family == "mlp" else f"kg{kan_grid_size}"
-    if family == "spline":
+    if family.endswith("spline"):
         grid_part += f"_ko{kan_spline_order}"
     prune_part = "" if family == "mlp" or prune_kan_fraction <= 0 else f"_prune{format_float_id(prune_kan_fraction)}"
     trial_id = (
@@ -428,6 +492,14 @@ def benchmark_command(
         str(trial["loss"]),
         "--prune-kan-fraction",
         str(trial.get("prune_kan_fraction", 0.0)),
+        "--prune-mode",
+        args.prune_mode,
+        "--prune-finetune-epochs",
+        str(args.prune_finetune_epochs),
+        "--kan-l1-lambda",
+        str(args.kan_l1_lambda),
+        "--activation",
+        args.activation,
         "--epochs",
         str(epochs),
         "--batch-size",
@@ -483,9 +555,65 @@ def benchmark_command(
     return cmd
 
 
-def run_benchmark(cmd: list[str], output_dir: Path, dataset: str) -> dict[str, Any]:
+def _terminate_process_tree(process: subprocess.Popen[Any]) -> None:
+    if process.poll() is not None:
+        return
+    if os.name == "posix":
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+    else:
+        process.terminate()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        if os.name == "posix":
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        else:
+            process.kill()
+        process.wait()
+
+
+def run_benchmark(
+    cmd: list[str],
+    output_dir: Path,
+    dataset: str,
+    timeout_minutes: float,
+    resume: bool,
+) -> dict[str, Any]:
     print(" ".join(cmd), flush=True)
-    subprocess.run(cmd, check=True, cwd=ROOT)
+    paths = sorted(output_dir.glob(f"modnet-kan-{dataset}-*.json"))
+    if resume and paths:
+        for path in reversed(paths):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                print(f"Ignoring incomplete benchmark JSON: {path}", flush=True)
+                continue
+            print(f"Reusing completed benchmark: {path}", flush=True)
+            return payload
+
+    popen_kwargs: dict[str, Any] = {"cwd": ROOT}
+    if os.name == "posix":
+        popen_kwargs["start_new_session"] = True
+    elif hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP"):
+        popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    process = subprocess.Popen(cmd, **popen_kwargs)
+    timeout_seconds = timeout_minutes * 60 if timeout_minutes > 0 else None
+    try:
+        return_code = process.wait(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired as exc:
+        _terminate_process_tree(process)
+        raise TimeoutError(
+            f"Benchmark exceeded {timeout_minutes:g} minutes: {' '.join(cmd)}"
+        ) from exc
+    if return_code != 0:
+        raise subprocess.CalledProcessError(return_code, cmd)
+
     paths = sorted(output_dir.glob(f"modnet-kan-{dataset}-*.json"))
     if not paths:
         raise FileNotFoundError(f"No benchmark JSON found in {output_dir}")
@@ -510,6 +638,13 @@ def summarize_trial(
                     "target": result.get("target", ""),
                     "target_names": result.get("target_names", ""),
                     "n_targets": result.get("n_targets", 1),
+                    "architecture": result.get("architecture", ""),
+                    "activation": result.get("activation", ""),
+                    "prune_mode": result.get("prune_mode", "none"),
+                    "pruned_edges": int(result.get("pruned_edges", 0)),
+                    "total_kan_edges": int(result.get("total_kan_edges", 0)),
+                    "prune_finetune_epochs": int(result.get("prune_finetune_epochs", 0)),
+                    "kan_l1_lambda": safe_float(result.get("kan_l1_lambda", 0.0)),
                     "params": int(result["params"]),
                     "effective_params": int(result.get("effective_params", result["params"])),
                     "pruned_params": int(result.get("pruned_params", 0)),
@@ -542,6 +677,8 @@ def summarize_trial(
         "params_after_prune_std": stdev(float(row["params_after_prune"]) for row in rows) if len(rows) > 1 else 0.0,
         "params_pruned_mean": mean(float(row["params_pruned"]) for row in rows),
         "params_pruned_pct_mean": mean(float(row["params_pruned_pct"]) for row in rows),
+        "pruned_edges_mean": mean(float(row["pruned_edges"]) for row in rows),
+        "total_kan_edges_mean": mean(float(row["total_kan_edges"]) for row in rows),
     }
     for metric in (
         *[f"{prefix}_{name}" for prefix in ("best_val", "test") for name in METRIC_NAMES],
@@ -802,6 +939,12 @@ def ordered_fieldnames(rows: list[dict[str, Any]]) -> list[str]:
 
 def main() -> None:
     args = parse_args()
+    if args.prune_finetune_epochs < 0:
+        raise ValueError("--prune-finetune-epochs must be non-negative")
+    if args.kan_l1_lambda < 0:
+        raise ValueError("--kan-l1-lambda must be non-negative")
+    if any(not 0.0 <= value < 1.0 for value in args.prune_kan_fraction_candidates):
+        raise ValueError("all --prune-kan-fraction-candidates must be in [0, 1)")
     task_type = matbench_task_type(args.dataset)
     if task_type not in TASK_TYPES:
         raise ValueError(f"{args.dataset} task_type is {task_type!r}; expected one of {TASK_TYPES}")
@@ -843,6 +986,7 @@ def main() -> None:
 
     fold_rows = []
     summary_rows = []
+    failed_runs: list[dict[str, Any]] = []
     for trial in trials:
         trial_dir = output_dir / "tuning" / trial["model_family"] / trial["trial_id"]
         trial_dir.mkdir(parents=True, exist_ok=True)
@@ -858,7 +1002,32 @@ def main() -> None:
             tuning_mode=True,
             export_formulas=False,
         )
-        payload = run_benchmark(cmd, trial_dir, args.dataset)
+        try:
+            payload = run_benchmark(
+                cmd,
+                trial_dir,
+                args.dataset,
+                timeout_minutes=args.trial_timeout_minutes,
+                resume=args.resume,
+            )
+        except (TimeoutError, subprocess.SubprocessError, OSError, ValueError) as exc:
+            failure = {
+                "phase": "tuning",
+                "dataset": args.dataset,
+                "trial_id": trial["trial_id"],
+                "model_family": trial["model_family"],
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+                "command": cmd,
+            }
+            failed_runs.append(failure)
+            (trial_dir / "FAILED.json").write_text(
+                json.dumps(failure, indent=2), encoding="utf-8"
+            )
+            print(f"Trial failed and was isolated: {exc}", flush=True)
+            if args.fail_fast:
+                raise
+            continue
         rows, summary = summarize_trial(trial, payload)
         for row in rows:
             row["selection_metric"] = args.metric
@@ -907,7 +1076,32 @@ def main() -> None:
                 export_formulas=family != "mlp" and not args.no_export_final_formulas,
             )
             final_commands[family] = cmd
-            payload = run_benchmark(cmd, family_dir, args.dataset)
+            try:
+                payload = run_benchmark(
+                    cmd,
+                    family_dir,
+                    args.dataset,
+                    timeout_minutes=args.trial_timeout_minutes,
+                    resume=args.resume,
+                )
+            except (TimeoutError, subprocess.SubprocessError, OSError, ValueError) as exc:
+                failure = {
+                    "phase": "final",
+                    "dataset": args.dataset,
+                    "trial_id": best["trial_id"],
+                    "model_family": family,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                    "command": cmd,
+                }
+                failed_runs.append(failure)
+                (family_dir / "FAILED.json").write_text(
+                    json.dumps(failure, indent=2), encoding="utf-8"
+                )
+                print(f"Final family run failed and was isolated: {exc}", flush=True)
+                if args.fail_fast:
+                    raise
+                continue
             final_payloads[family] = payload
             rows, summaries, matbench_record = summarize_final_payload(best, payload)
             for row in rows:
@@ -947,9 +1141,14 @@ def main() -> None:
         "final_summary": final_summary_rows,
         "final_matbench_records": final_records,
         "all_trials": summary_rows,
+        "failed_runs": failed_runs,
     }
     best_json = output_dir / "best_config.json"
     best_json.write_text(json.dumps(best_payload, indent=2), encoding="utf-8")
+    if failed_runs:
+        (output_dir / "failed-runs.json").write_text(
+            json.dumps(failed_runs, indent=2), encoding="utf-8"
+        )
 
     print("\nBest trials by family:")
     for family, row in best_by_family.items():
