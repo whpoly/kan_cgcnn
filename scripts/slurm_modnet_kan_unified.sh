@@ -41,11 +41,8 @@ SMALL_TASKS=(
   matbench_dielectric
   matbench_elastic
   matbench_expt_gap
-  matbench_glass
-  matbench_jdft2d
   matbench_perovskites
   matbench_phonons
-  matbench_steels
 )
 
 if [[ "$TASK_SET" == "all" ]]; then
@@ -103,7 +100,7 @@ for task in "${TASKS[@]}"; do
     python -u scripts/tune_modnet_kan.py \
     --dataset "$task" \
     --precomputed-feature-dir "$feature_dir" \
-    --model-families mlp hybrid-fastkan hybrid-spline \
+    --model-families mlp fastkan spline \
     --protocol matbench-nested \
     --inner-folds 5 \
     --final-folds 0 1 2 3 4 \
@@ -119,8 +116,10 @@ for task in "${TASKS[@]}"; do
     --loss-candidates mae rmse \
     --activation elu \
     --kan-l1-lambda 0 \
+    --kan-sparsity-mode edge-group \
     --prune-kan-fraction-candidates 0 \
     --posthoc-prune-kan-fraction 0.3 \
+    --posthoc-kan-sparsity-lambda 1e-4 \
     --prune-mode edge \
     --prune-finetune-epochs 20 \
     --scaler minmax \

@@ -33,7 +33,7 @@ MODEL_FAMILIES = [
     "fastkan",
     "spline",
 ]
-DEFAULT_MODEL_FAMILIES = ["mlp", "hybrid-fastkan", "hybrid-spline"]
+DEFAULT_MODEL_FAMILIES = ["mlp", "fastkan", "spline"]
 TASK_TYPES = ("regression", "classification")
 METRIC_NAMES = [
     "mae",
@@ -61,7 +61,7 @@ MAXIMIZE_METRICS = {
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Tune MODNet MLP baselines and hybrid/direct KAN predictors, "
+            "Tune MODNet MLP baselines and compact all-KAN/hybrid/direct predictors, "
             "then run Matbench-aligned final benchmarks."
         )
     )
@@ -157,7 +157,17 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--prune-mode", choices=["edge", "parameter"], default="edge")
     parser.add_argument("--prune-finetune-epochs", type=int, default=0)
-    parser.add_argument("--kan-l1-lambda", type=float, default=0.0)
+    parser.add_argument(
+        "--kan-l1-lambda",
+        type=float,
+        default=0.0,
+        help="Sparse penalty for legacy runs; strict Matbench benchmark models use 0.",
+    )
+    parser.add_argument(
+        "--kan-sparsity-mode",
+        choices=["edge-group", "parameter-l1"],
+        default="edge-group",
+    )
     parser.add_argument(
         "--activation",
         choices=["relu", "elu", "silu"],
@@ -216,6 +226,15 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Fixed KAN pruning fraction evaluated after model selection. It is never "
             "used to select hyperparameters; use 0 to disable the post-hoc run."
+        ),
+    )
+    parser.add_argument(
+        "--posthoc-kan-sparsity-lambda",
+        type=float,
+        default=1e-4,
+        help=(
+            "Fixed sparse penalty used from the start of the separate interpretation "
+            "model retraining; never used by the benchmark model."
         ),
     )
     parser.add_argument("--simple-formula-min-inputs", type=int, default=5)
@@ -319,13 +338,19 @@ def candidate_space(args: argparse.Namespace, family: str) -> dict[str, list[Any
         }
     else:
         defaults = {
-            "n_features": [128, 256, 512],
-            "common_dim": [32, 64, 128],
-            "group_dim": [16, 32, 64],
-            "property_dim": [0, 8, 16, 32],
-            "target_dim": [0, 8, 16],
-            "kan_grid_size": [3, 5],
-            "kan_spline_order": [3],
+            # A full KAN edge carries several basis coefficients, so copying
+            # the much wider MODNet MLP shape would violate the parameter
+            # budget.  Zero skips a hierarchy block, allowing direct and
+            # shallow compact KANs in the same nested search.
+            # Match the MLP descriptor-count candidates. Parameter savings
+            # must come from the compact neural topology, not fewer inputs.
+            "n_features": [256, 512],
+            "common_dim": [0, 16, 32, 64],
+            "group_dim": [0, 8, 16, 32],
+            "property_dim": [0, 8, 16],
+            "target_dim": [0, 4, 8, 16],
+            "kan_grid_size": [2, 3, 5],
+            "kan_spline_order": [2, 3],
             "lr": [3e-4, 1e-3, 2e-3],
             "weight_decay": [0.0, 1e-6],
             "dropout": [0.0],
@@ -356,6 +381,8 @@ def make_trials(args: argparse.Namespace) -> list[dict[str, Any]]:
             family_trials = random_trials(args, family)
         else:
             family_trials = compact_trials(args, family)
+        if is_full_kan_family(family):
+            family_trials = [trial for trial in family_trials if valid_compact_kan_trial(trial)]
         if args.max_trials_per_family is not None:
             family_trials = family_trials[: args.max_trials_per_family]
         for trial in family_trials:
@@ -367,11 +394,15 @@ def make_trials(args: argparse.Namespace) -> list[dict[str, Any]]:
 
 def compact_trials(args: argparse.Namespace, family: str) -> list[dict[str, Any]]:
     space = candidate_space(args, family)
+    grid_small = space["kan_grid_size"][0]
+    grid_large = space["kan_grid_size"][-1]
+    order_small = space["kan_spline_order"][0]
+    order_large = space["kan_spline_order"][-1]
     base_specs = [
-        (space["n_features"][0], space["common_dim"][0], space["group_dim"][0], space["property_dim"][0], space["target_dim"][0], 3, 3, space["lr"][0], space["weight_decay"][0], space["dropout"][0]),
-        (space["n_features"][min(1, len(space["n_features"]) - 1)], space["common_dim"][0], space["group_dim"][0], space["property_dim"][0], space["target_dim"][min(1, len(space["target_dim"]) - 1)], 5, 3, space["lr"][min(1, len(space["lr"]) - 1)], space["weight_decay"][0], space["dropout"][0]),
-        (space["n_features"][min(2, len(space["n_features"]) - 1)], space["common_dim"][min(1, len(space["common_dim"]) - 1)], space["group_dim"][min(1, len(space["group_dim"]) - 1)], space["property_dim"][min(1, len(space["property_dim"]) - 1)], space["target_dim"][0], 3, 3, space["lr"][min(1, len(space["lr"]) - 1)], space["weight_decay"][min(1, len(space["weight_decay"]) - 1)], space["dropout"][min(1, len(space["dropout"]) - 1)]),
-        (space["n_features"][-1], space["common_dim"][-1], space["group_dim"][-1], space["property_dim"][-1], space["target_dim"][-1], 5, 3, space["lr"][-1], space["weight_decay"][0], space["dropout"][0]),
+        (space["n_features"][0], space["common_dim"][0], space["group_dim"][0], space["property_dim"][0], space["target_dim"][0], grid_small, order_small, space["lr"][0], space["weight_decay"][0], space["dropout"][0]),
+        (space["n_features"][min(1, len(space["n_features"]) - 1)], space["common_dim"][0], space["group_dim"][0], space["property_dim"][0], space["target_dim"][min(1, len(space["target_dim"]) - 1)], grid_large, order_large, space["lr"][min(1, len(space["lr"]) - 1)], space["weight_decay"][0], space["dropout"][0]),
+        (space["n_features"][min(2, len(space["n_features"]) - 1)], space["common_dim"][min(1, len(space["common_dim"]) - 1)], space["group_dim"][min(1, len(space["group_dim"]) - 1)], space["property_dim"][min(1, len(space["property_dim"]) - 1)], space["target_dim"][0], grid_small, order_small, space["lr"][min(1, len(space["lr"]) - 1)], space["weight_decay"][min(1, len(space["weight_decay"]) - 1)], space["dropout"][min(1, len(space["dropout"]) - 1)]),
+        (space["n_features"][-1], space["common_dim"][-1], space["group_dim"][-1], space["property_dim"][-1], space["target_dim"][-1], grid_large, order_large, space["lr"][-1], space["weight_decay"][0], space["dropout"][0]),
     ]
     trials: dict[str, dict[str, Any]] = {}
     prune_values = [0.0] if family == "mlp" else space["prune_kan_fraction"]
@@ -380,7 +411,26 @@ def compact_trials(args: argparse.Namespace, family: str) -> list[dict[str, Any]
             for prune_fraction in prune_values:
                 trial = make_trial(family, *spec, loss, prune_fraction)
                 trials[trial["trial_id"]] = trial
-    return list(trials.values())
+    values = list(trials.values())
+    if is_full_kan_family(family):
+        values = [trial for trial in values if valid_compact_kan_trial(trial)]
+    return values
+
+
+def is_full_kan_family(family: str) -> bool:
+    return family in {"fastkan", "spline"}
+
+
+def valid_compact_kan_trial(trial: dict[str, Any]) -> bool:
+    """Keep compact full-KAN widths non-expanding after skipped blocks."""
+
+    active_dims = [
+        int(trial[key])
+        for key in ("common_dim", "group_dim", "property_dim", "target_dim")
+        if int(trial[key]) > 0
+    ]
+    dims = [int(trial["n_features"]), *active_dims]
+    return all(source >= destination for source, destination in zip(dims, dims[1:]))
 
 
 def random_trials(args: argparse.Namespace, family: str) -> list[dict[str, Any]]:
@@ -409,6 +459,8 @@ def random_trials(args: argparse.Namespace, family: str) -> list[dict[str, Any]]
             rng.choice(space["loss"]),
             0.0 if family == "mlp" else rng.choice(space["prune_kan_fraction"]),
         )
+        if is_full_kan_family(family) and not valid_compact_kan_trial(trial):
+            continue
         trials.setdefault(trial["trial_id"], trial)
         if len(trials) >= args.num_random_trials:
             break
@@ -498,6 +550,7 @@ def benchmark_command(
     inner_n_splits: int | None = None,
     val_ratio_override: float | None = None,
     prune_fraction_override: float | None = None,
+    kan_l1_lambda_override: float | None = None,
     distill_simple_formula: bool = False,
 ) -> list[str]:
     family = trial["model_family"]
@@ -545,7 +598,13 @@ def benchmark_command(
         "--prune-finetune-epochs",
         str(args.prune_finetune_epochs),
         "--kan-l1-lambda",
-        str(args.kan_l1_lambda),
+        str(
+            args.kan_l1_lambda
+            if kan_l1_lambda_override is None
+            else kan_l1_lambda_override
+        ),
+        "--kan-sparsity-mode",
+        args.kan_sparsity_mode,
         "--activation",
         args.activation,
         "--epochs",
@@ -669,6 +728,9 @@ def run_benchmark(
             except (OSError, ValueError):
                 print(f"Ignoring incomplete benchmark JSON: {path}", flush=True)
                 continue
+            if not resume_payload_matches_command(payload, cmd):
+                print(f"Ignoring result created by a different command: {path}", flush=True)
+                continue
             print(f"Reusing completed benchmark: {path}", flush=True)
             return payload
 
@@ -693,6 +755,31 @@ def run_benchmark(
     if not paths:
         raise FileNotFoundError(f"No benchmark JSON found in {output_dir}")
     return json.loads(paths[-1].read_text(encoding="utf-8"))
+
+
+def command_option(cmd: list[str], option: str) -> str | None:
+    try:
+        index = cmd.index(option)
+    except ValueError:
+        return None
+    return cmd[index + 1] if index + 1 < len(cmd) else None
+
+
+def resume_payload_matches_command(payload: dict[str, Any], cmd: list[str]) -> bool:
+    """Reject stale sparse/non-sparse results when --resume is enabled."""
+
+    payload_args = payload.get("args", {})
+    expected_lambda_text = command_option(cmd, "--kan-l1-lambda")
+    expected_lambda = float(expected_lambda_text or 0.0)
+    actual_lambda = safe_float(payload_args.get("kan_l1_lambda", 0.0))
+    if not math.isclose(actual_lambda, expected_lambda, rel_tol=0.0, abs_tol=1e-15):
+        return False
+
+    expected_mode = command_option(cmd, "--kan-sparsity-mode") or "edge-group"
+    actual_mode = payload_args.get("kan_sparsity_mode")
+    if expected_lambda > 0 and actual_mode != expected_mode:
+        return False
+    return True
 
 
 def summarize_trial(
@@ -870,12 +957,20 @@ def print_summary(summary_rows: list[dict[str, Any]], metric: str) -> None:
         "trial_id",
         "folds",
         "prune_kan_fraction",
+        "kan_sparsity_lambda",
         "params_before_prune_mean",
         "params_after_prune_mean",
         "params_pruned_mean",
         "params_pruned_pct_mean",
         "mlp_params_after_prune_budget",
         "parameter_budget_ok",
+        "mlp_params_reference",
+        "parameter_reduction_vs_mlp_pct",
+        "mlp_test_metric_reference",
+        "test_performance_delta_vs_mlp",
+        "smaller_than_mlp",
+        "outperforms_mlp",
+        "meets_smaller_and_better_goal",
         metric_mean,
     ]
     for optional in ("best_val_mae_mean", "best_val_rmse_mean", "best_val_rocauc_mean", "test_mae_mean", "test_rmse_mean", "test_rocauc_mean"):
@@ -1048,6 +1143,7 @@ def aggregate_nested_final_rows(
             "model_family": family,
             "model": family_rows[0].get("model", family),
             "evaluation_variant": variant,
+            "kan_sparsity_mode": family_rows[0].get("kan_sparsity_mode", "none"),
             "folds": len(family_rows),
             "selected_trial_ids": ";".join(
                 str(row.get("trial_id", "")) for row in family_rows
@@ -1086,6 +1182,61 @@ def aggregate_nested_final_rows(
             if paths:
                 summary[f"{path_key}s"] = ";".join(paths)
         summaries.append(summary)
+    return summaries
+
+
+def annotate_against_mlp(
+    summaries: list[dict[str, Any]],
+    task_type: str,
+) -> list[dict[str, Any]]:
+    """Report whether each final model is both smaller and better than MLP."""
+
+    mlp = next(
+        (
+            row
+            for row in summaries
+            if row.get("model_family") == "mlp"
+            and row.get("evaluation_variant") == "unpruned-benchmark"
+        ),
+        None,
+    )
+    if mlp is None:
+        return summaries
+
+    parameter_key = "params_after_prune_mean"
+    metric_key = "test_rocauc_mean" if task_type == "classification" else "test_mae_mean"
+    mlp_parameters = safe_float(mlp.get(parameter_key))
+    mlp_metric = safe_float(mlp.get(metric_key))
+    if not math.isfinite(mlp_parameters) or not math.isfinite(mlp_metric):
+        return summaries
+
+    for row in summaries:
+        parameters = safe_float(row.get(parameter_key))
+        metric = safe_float(row.get(metric_key))
+        if not math.isfinite(parameters) or not math.isfinite(metric):
+            continue
+        smaller = parameters < mlp_parameters
+        performance_delta = (
+            metric - mlp_metric
+            if task_type == "classification"
+            else mlp_metric - metric
+        )
+        better = performance_delta > 0
+        row.update(
+            {
+                "mlp_params_reference": mlp_parameters,
+                "parameter_reduction_vs_mlp_pct": (
+                    100.0 * (mlp_parameters - parameters) / mlp_parameters
+                    if mlp_parameters
+                    else float("nan")
+                ),
+                "mlp_test_metric_reference": mlp_metric,
+                "test_performance_delta_vs_mlp": performance_delta,
+                "smaller_than_mlp": smaller,
+                "outperforms_mlp": better,
+                "meets_smaller_and_better_goal": smaller and better,
+            }
+        )
     return summaries
 
 
@@ -1232,6 +1383,7 @@ def run_nested_protocol(
                     inner_fold_index=inner_fold,
                     inner_n_splits=args.inner_folds,
                     prune_fraction_override=0.0,
+                    kan_l1_lambda_override=0.0,
                 )
                 try:
                     payload = run_benchmark(
@@ -1385,6 +1537,7 @@ def run_nested_protocol(
                 export_formulas=False,
                 val_ratio_override=0.0,
                 prune_fraction_override=0.0,
+                kan_l1_lambda_override=0.0,
             )
             final_commands[str(outer_fold)][family] = {"unpruned_benchmark": cmd}
             try:
@@ -1453,6 +1606,7 @@ def run_nested_protocol(
                 export_formulas=not args.no_export_final_formulas,
                 val_ratio_override=0.0,
                 prune_fraction_override=args.posthoc_prune_kan_fraction,
+                kan_l1_lambda_override=args.posthoc_kan_sparsity_lambda,
                 distill_simple_formula=True,
             )
             interpretation_cmd.append("--no-matbench-records")
@@ -1477,7 +1631,7 @@ def run_nested_protocol(
                             "trial_id": selected["trial_id"],
                             "selected_epochs": selected_epochs,
                             "selection_metric": args.metric,
-                            "evaluation_variant": "posthoc-pruned-interpretation",
+                            "evaluation_variant": "sparsity-trained-pruned-interpretation",
                         }
                     )
                     add_parameter_aliases(row)
@@ -1500,7 +1654,10 @@ def run_nested_protocol(
 
     write_csv(output_dir / f"nested-tuning-fold-results-{args.dataset}.csv", all_inner_rows)
     write_csv(output_dir / f"nested-tuning-summary-{args.dataset}.csv", all_inner_summaries)
-    final_summary = aggregate_nested_final_rows(final_rows, args.dataset, task_type)
+    final_summary = annotate_against_mlp(
+        aggregate_nested_final_rows(final_rows, args.dataset, task_type),
+        task_type,
+    )
     write_csv(output_dir / f"final-fold-results-{args.dataset}.csv", final_rows)
     write_csv(output_dir / f"final-summary-{args.dataset}.csv", final_summary)
     final_matbench_records = (
@@ -1523,8 +1680,15 @@ def run_nested_protocol(
         "outer_folds": args.final_folds,
         "inner_folds": args.inner_folds,
         "selection_metric": args.metric,
+        "architecture_goal": (
+            "Nested-select compact all-KAN networks under the selected MLP parameter "
+            "budget; outer-test performance is reported without selection leakage."
+        ),
         "pruning_role": "fixed post-hoc interpretation only",
         "posthoc_prune_kan_fraction": args.posthoc_prune_kan_fraction,
+        "benchmark_kan_sparsity_lambda": 0.0,
+        "posthoc_kan_sparsity_lambda": args.posthoc_kan_sparsity_lambda,
+        "kan_sparsity_mode": args.kan_sparsity_mode,
         "simple_formula_input_candidates": list(
             range(args.simple_formula_min_inputs, args.simple_formula_max_inputs + 1)
         ),
@@ -1555,6 +1719,13 @@ def main() -> None:
         raise ValueError("--prune-finetune-epochs must be non-negative")
     if args.kan_l1_lambda < 0:
         raise ValueError("--kan-l1-lambda must be non-negative")
+    if (
+        args.posthoc_prune_kan_fraction > 0
+        and args.posthoc_kan_sparsity_lambda <= 0
+    ):
+        raise ValueError(
+            "--posthoc-kan-sparsity-lambda must be positive when post-hoc pruning is enabled"
+        )
     if any(not 0.0 <= value < 1.0 for value in args.prune_kan_fraction_candidates):
         raise ValueError("all --prune-kan-fraction-candidates must be in [0, 1)")
     if not 0.0 <= args.posthoc_prune_kan_fraction < 1.0:

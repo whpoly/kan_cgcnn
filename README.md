@@ -2,12 +2,13 @@
 
 ## MODNet KAN Benchmark Quickstart
 
-This repo includes a descriptor-based benchmark that keeps MODNet's feature
-selection and hierarchical MLP trunk, then replaces the target predictor with
-a KAN. The recommended comparison is `mlp`, `hybrid-fastkan`, and
-`hybrid-spline`. `direct-fastkan`/`direct-spline` map selected physical
-descriptors directly to KAN for a more transparent ablation; `fastkan` and
-`spline` retain the older all-KAN ablation.
+This repo includes a descriptor-based benchmark that keeps MODNet's official
+feature selection while allowing the neural hierarchy itself to change. The
+default comparison is the MLP reference against compact all-KAN `fastkan` and
+`spline` models. All families search the same 256/512 descriptor counts; KAN
+parameter savings must come from skipped common/group/property/target blocks,
+narrower non-expanding widths, and smaller grids rather than fewer descriptors.
+Hybrid and direct families remain available as ablations.
 
 The default tuner uses strict nested Matbench evaluation. Every outer fold has
 its own five-fold inner hyperparameter search; the outer test fold is evaluated
@@ -28,7 +29,7 @@ Fast smoke test:
 python scripts\benchmark_modnet_kan.py `
   --dataset matbench_phonons `
   --folds 0 `
-  --models mlp hybrid-fastkan direct-fastkan `
+  --models mlp fastkan spline `
   --featurizer-preset pymatgen-composition `
   --n-features 64 `
   --epochs 20 `
@@ -43,7 +44,7 @@ Formula-export smoke test:
 python scripts\benchmark_modnet_kan.py `
   --dataset matbench_phonons `
   --folds 0 `
-  --models hybrid-fastkan `
+  --models spline `
   --featurizer-preset pymatgen-composition `
   --n-features 64 `
   --epochs 20 `
@@ -107,11 +108,11 @@ The default reliable tuning protocol is:
 - the selected inner-CV epoch count is used to refit on that outer fold's full
   train+validation partition before its test fold is evaluated;
 - MLP tries wider hidden blocks such as `256/512` common dims;
-- KAN tries smaller blocks such as `32/64/128` common dims, matching the KAN
-  paper's motivation that narrower KANs can compete with wider MLPs;
-- the search includes `target_dim=0`, so shallower formulas without the final
-  hidden target block are tested;
-- KAN grid sizes `3` and `5`, learning rates, MAE/RMSE losses, and architecture
+- MLP and full KAN both search 256/512 selected descriptors;
+- full KAN searches zero to four hidden KAN blocks;
+  zero skips a MODNet hierarchy block, so the topology need not copy MODNet;
+- active KAN widths are non-expanding and much narrower than the MLP baseline;
+- KAN grid sizes `2`, `3`, and `5`, learning rates, MAE/RMSE losses, and architecture
   sizes are tuned; pruning is fixed at `0.3` only in the post-hoc run;
 - post-hoc formula distillation evaluates `5..10` descriptor inputs, selects
   the smallest formula within 2% of the best inner validation fidelity, and
@@ -243,8 +244,9 @@ chooses the top descriptors on the training split, and a dense hierarchy maps
 `features -> shared trunk -> property group -> property head -> output`.
 
 This repo includes a PyTorch version with independently selectable block types.
-The recommended hybrid keeps the common/group/property MLP blocks and replaces
-the target predictor and output mapping with KAN:
+The default `fastkan` and `spline` families make every active block and the
+output mapping a KAN; the nested search may skip hierarchy blocks to discover a
+smaller direct, shallow, or bottleneck topology:
 
 - model: `cgcnn_pyg_kan.modnet.MODNetKAN`
 - features/preprocessing: `cgcnn_pyg_kan.modnet_features`
@@ -304,7 +306,7 @@ conda activate kan-cgcnn-cuda
 python -u scripts\benchmark_modnet_kan.py `
   --dataset matbench_phonons `
   --folds 0 1 2 3 4 `
-  --models mlp hybrid-fastkan hybrid-spline direct-fastkan `
+  --models mlp fastkan spline direct-fastkan `
   --precomputed-feature-dir benchmarks\official-modnet-v012-small\matbench_phonons\official_feature_folds `
   --n-features 512 `
   --common-dims 512 `
@@ -371,7 +373,7 @@ Parameter tuning plus Matbench-aligned final benchmark:
 ```powershell
 python scripts/tune_modnet_kan.py `
   --dataset matbench_phonons `
-  --model-families mlp hybrid-fastkan hybrid-spline direct-fastkan `
+  --model-families mlp fastkan spline direct-fastkan `
   --protocol matbench-nested `
   --inner-folds 5 `
   --final-folds 0 1 2 3 4 `
@@ -395,6 +397,8 @@ python scripts/tune_modnet_kan.py `
   --prune-mode edge `
   --prune-finetune-epochs 20 `
   --kan-l1-lambda 0 `
+  --kan-sparsity-mode edge-group `
+  --posthoc-kan-sparsity-lambda 1e-4 `
   --simple-formula-min-inputs 5 `
   --simple-formula-max-inputs 10 `
   --simple-formula-max-terms 10 `
@@ -427,7 +431,15 @@ below the selected MLP's effective parameter count. If no KAN trial satisfies
 that budget, that KAN family is skipped in the final benchmark. Pruning must
 remain `--prune-kan-fraction-candidates 0` during nested tuning. A fixed
 `--posthoc-prune-kan-fraction` is reported as the separate
-`posthoc-pruned-interpretation` variant and cannot become the benchmark winner.
+`sparsity-trained-pruned-interpretation` variant and cannot become the benchmark
+winner. The accuracy model is trained with `--kan-l1-lambda 0`; a second model
+is retrained from scratch using the fixed `--posthoc-kan-sparsity-lambda`
+edge-group penalty, then structurally pruned, mask-fine-tuned, and distilled
+over 5--10 inputs.
+The final summary additionally reports `parameter_reduction_vs_mlp_pct`,
+`test_performance_delta_vs_mlp`, and `meets_smaller_and_better_goal`; positive
+performance delta always means better (lower MAE for regression, higher ROC-AUC
+for classification).
 Use `--allow-kan-larger-than-mlp` only for ablations
 where parameter fairness is intentionally disabled.
 
@@ -448,7 +460,7 @@ Matbench-strict all-dataset run:
 
 ```powershell
 python scripts/tune_modnet_all_matbench.py `
-  --model-families mlp hybrid-fastkan hybrid-spline `
+  --model-families mlp fastkan spline `
   --protocol matbench-nested `
   --inner-folds 5 `
   --final-folds 0 1 2 3 4 `
@@ -469,6 +481,8 @@ python scripts/tune_modnet_all_matbench.py `
   --loss-candidates mae rmse `
   --prune-kan-fraction-candidates 0 `
   --posthoc-prune-kan-fraction 0.3 `
+  --kan-sparsity-mode edge-group `
+  --posthoc-kan-sparsity-lambda 1e-4 `
   --simple-formula-min-inputs 5 `
   --simple-formula-max-inputs 10 `
   --target-scale none `

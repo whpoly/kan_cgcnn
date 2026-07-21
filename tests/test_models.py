@@ -12,7 +12,7 @@ from cgcnn_pyg_kan.materials import (
 from cgcnn_pyg_kan.modnet import IdentityBlock, MLPBlock, MODNetKAN
 from cgcnn_pyg_kan.modnet_features import MODNetFeatureProcessor, make_feature_frame
 from cgcnn_pyg_kan.model import CGCNN
-from cgcnn_pyg_kan.pruning import apply_kan_edge_pruning
+from cgcnn_pyg_kan.pruning import apply_kan_edge_pruning, kan_edge_group_penalty
 
 
 def test_cgcnn_conv_nets_forward() -> None:
@@ -162,6 +162,23 @@ def test_modnet_kan_single_target_forward() -> None:
     assert torch.isfinite(output).all()
 
 
+def test_compact_full_kan_contains_no_mlp_blocks() -> None:
+    model = MODNetKAN(
+        n_feat=32,
+        targets=[[["target"]]],
+        num_neurons=([16], [], [8], []),
+        block_types=("kan", "kan", "kan", "kan"),
+        output_head_type="kan",
+        kan_impl="fastkan",
+        kan_grid_size=2,
+    )
+    output = model(torch.randn(4, 32))
+
+    assert output.shape == (4,)
+    assert not any(isinstance(module, MLPBlock) for module in model.modules())
+    assert any(isinstance(module, FastKANLinear) for module in model.modules())
+
+
 def test_modnet_kan_multi_target_forward() -> None:
     model = MODNetKAN(
         n_feat=6,
@@ -249,6 +266,32 @@ def test_structured_kan_pruning_does_not_touch_mlp_trunk_and_keeps_connectivity(
     for parameter, mask in masks.masks:
         assert torch.count_nonzero(parameter.detach()[~mask]) == 0
     masks.remove_hooks()
+
+
+def test_edge_group_sparsity_matches_prunable_kan_edges() -> None:
+    model = MODNetKAN(
+        n_feat=6,
+        targets=[[["target"]]],
+        num_neurons=([8], [6], [4], []),
+        block_types=("mlp", "mlp", "mlp", "kan"),
+        output_head_type="kan",
+        kan_impl="fastkan",
+        kan_grid_size=3,
+    )
+    penalty = kan_edge_group_penalty(model)
+    penalty.backward()
+
+    assert penalty.ndim == 0
+    assert torch.isfinite(penalty)
+    assert penalty.item() > 0
+    head = next(
+        module
+        for module in model.output_heads.modules()
+        if isinstance(module, FastKANLinear)
+    )
+    assert head.spline_linear.weight.grad is not None
+    assert head.base_linear is not None
+    assert head.base_linear.weight.grad is not None
 
 
 def test_modnet_feature_processor_selects_and_transforms() -> None:

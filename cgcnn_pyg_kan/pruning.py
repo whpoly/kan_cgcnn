@@ -36,6 +36,41 @@ def kan_l1_penalty(model: torch.nn.Module) -> torch.Tensor:
     return torch.stack([parameter.abs().mean() for parameter in parameters]).mean()
 
 
+def kan_edge_group_penalty(model: torch.nn.Module) -> torch.Tensor:
+    """Group-lasso penalty whose groups exactly match structured KAN edges."""
+
+    edge_norms: list[torch.Tensor] = []
+    for module in iter_kan_modules(model):
+        if isinstance(module, KANLinear):
+            spline = module.scaled_spline_weight
+            squared_norm = module.base_weight.square() + spline.square().sum(dim=-1)
+        else:
+            grids = int(module.rbf.grid.numel())
+            spline = module.spline_linear.weight.view(
+                module.out_features, module.in_features, grids
+            )
+            squared_norm = spline.square().sum(dim=-1)
+            if module.base_linear is not None:
+                squared_norm = squared_norm + module.base_linear.weight.square()
+        edge_norms.append(
+            torch.sqrt(
+                squared_norm + torch.finfo(squared_norm.dtype).eps
+            ).reshape(-1)
+        )
+
+    if not edge_norms:
+        return next(model.parameters()).new_zeros(())
+    return torch.cat(edge_norms).mean()
+
+
+def kan_sparsity_penalty(model: torch.nn.Module, mode: str) -> torch.Tensor:
+    if mode == "edge-group":
+        return kan_edge_group_penalty(model)
+    if mode == "parameter-l1":
+        return kan_l1_penalty(model)
+    raise ValueError(f"unsupported KAN sparsity mode {mode!r}")
+
+
 @dataclass
 class PruningMasks:
     """Persistent zero masks used during post-pruning fine-tuning."""

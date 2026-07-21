@@ -21,7 +21,7 @@ MODEL_FAMILIES = [
     "fastkan",
     "spline",
 ]
-DEFAULT_MODEL_FAMILIES = ["mlp", "hybrid-fastkan", "hybrid-spline"]
+DEFAULT_MODEL_FAMILIES = ["mlp", "fastkan", "spline"]
 TASK_TYPES = ["regression", "classification"]
 FEATURE_PRESETS = [
     "auto",
@@ -117,6 +117,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prune-finetune-epochs", type=int, default=0)
     parser.add_argument("--posthoc-prune-kan-fraction", type=float, default=0.3)
     parser.add_argument("--kan-l1-lambda", type=float, default=0.0)
+    parser.add_argument("--kan-sparsity-mode", choices=["edge-group", "parameter-l1"], default="edge-group")
+    parser.add_argument("--posthoc-kan-sparsity-lambda", type=float, default=1e-4)
     parser.add_argument("--activation", choices=["relu", "elu", "silu"], default="elu")
     parser.add_argument("--trial-timeout-minutes", type=float, default=180.0)
     parser.add_argument("--allow-kan-larger-than-mlp", action="store_true")
@@ -293,6 +295,10 @@ def build_tune_command(args: argparse.Namespace, dataset: str, output_dir: Path)
         str(args.posthoc_prune_kan_fraction),
         "--kan-l1-lambda",
         str(args.kan_l1_lambda),
+        "--kan-sparsity-mode",
+        args.kan_sparsity_mode,
+        "--posthoc-kan-sparsity-lambda",
+        str(args.posthoc_kan_sparsity_lambda),
         "--activation",
         args.activation,
         "--trial-timeout-minutes",

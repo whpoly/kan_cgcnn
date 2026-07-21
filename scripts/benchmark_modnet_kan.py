@@ -31,7 +31,7 @@ if str(ROOT) not in sys.path:
 from cgcnn_pyg_kan.kan import FastKANLinear, KANLinear
 from cgcnn_pyg_kan.modnet import MODNetKAN
 from cgcnn_pyg_kan.modnet_features import MODNetFeatureProcessor, make_feature_frame
-from cgcnn_pyg_kan.pruning import PruningMasks, apply_kan_pruning, kan_l1_penalty
+from cgcnn_pyg_kan.pruning import PruningMasks, apply_kan_pruning, kan_sparsity_penalty
 
 FEATURE_PRESETS = [
     "auto",
@@ -227,7 +227,19 @@ def parse_args() -> argparse.Namespace:
         "--kan-l1-lambda",
         type=float,
         default=0.0,
-        help="Mean absolute KAN-parameter penalty used to encourage sparse predictors.",
+        help=(
+            "Strength of --kan-sparsity-mode. Keep at 0 for the official accuracy "
+            "benchmark; use a positive fixed value for the separate sparse model."
+        ),
+    )
+    parser.add_argument(
+        "--kan-sparsity-mode",
+        choices=["edge-group", "parameter-l1"],
+        default="edge-group",
+        help=(
+            "edge-group penalises the same input-output edge groups later removed by "
+            "structured pruning; parameter-l1 is retained as an ablation."
+        ),
     )
     parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--batch-size", type=int, default=128)
@@ -891,7 +903,7 @@ def build_model(
     else:
         block_types = ("kan", "kan", "kan", "kan")
         output_head_type = "kan"
-        architecture = "modnet-kan"
+        architecture = "compact-all-kan"
     model = MODNetKAN(
         n_feat=n_feat,
         targets=[[target_names]],
@@ -992,6 +1004,7 @@ def train_one_epoch(
     task_type: str,
     loss_name: str,
     kan_l1_lambda: float = 0.0,
+    kan_sparsity_mode: str = "edge-group",
     pruning_masks: PruningMasks | None = None,
 ) -> float:
     model.train()
@@ -1004,7 +1017,9 @@ def train_one_epoch(
         prediction = model(batch_x)
         loss = task_loss(prediction.view_as(batch_y), batch_y, task_type, loss_name)
         if kan_l1_lambda > 0:
-            loss = loss + kan_l1_lambda * kan_l1_penalty(model)
+            loss = loss + kan_l1_lambda * kan_sparsity_penalty(
+                model, kan_sparsity_mode
+            )
         loss.backward()
         optimizer.step()
         if pruning_masks is not None:
@@ -1660,6 +1675,7 @@ def run_model(
             task_type,
             args.loss,
             kan_l1_lambda=args.kan_l1_lambda if is_kan_family(model_label) else 0.0,
+            kan_sparsity_mode=args.kan_sparsity_mode,
         )
         if val_loader is not None:
             val_metrics = evaluate(
@@ -1748,6 +1764,8 @@ def run_model(
                     device,
                     task_type,
                     args.loss,
+                    kan_l1_lambda=args.kan_l1_lambda,
+                    kan_sparsity_mode=args.kan_sparsity_mode,
                     pruning_masks=pruning_masks,
                 )
                 if val_loader is not None:
@@ -1854,6 +1872,14 @@ def run_model(
         "prune_finetune_epochs": args.prune_finetune_epochs if is_kan_family(model_label) else 0,
         "prune_finetune_seconds": prune_finetune_seconds,
         "kan_l1_lambda": args.kan_l1_lambda if is_kan_family(model_label) else 0.0,
+        "kan_sparsity_lambda": (
+            args.kan_l1_lambda if is_kan_family(model_label) else 0.0
+        ),
+        "kan_sparsity_mode": (
+            args.kan_sparsity_mode
+            if is_kan_family(model_label) and args.kan_l1_lambda > 0
+            else "none"
+        ),
         "activation": args.activation,
         "lr": args.lr,
         "weight_decay": args.weight_decay,
@@ -2981,6 +3007,8 @@ def ordered_fieldnames(rows: list[dict[str, Any]]) -> list[str]:
         "prune_finetune_epochs",
         "prune_finetune_seconds",
         "kan_l1_lambda",
+        "kan_sparsity_lambda",
+        "kan_sparsity_mode",
         "params_before_prune",
         "params_after_prune",
         "params_pruned",

@@ -39,7 +39,8 @@ KAN_ENV="${KAN_ENV:-kan-cgcnn-cuda}"
 OFFICIAL_OUTPUT_DIR="${OFFICIAL_OUTPUT_DIR:-${PROJECT_DIR}/benchmarks/official-modnet-v012-resumable}"
 KAN_OUTPUT_ROOT="${KAN_OUTPUT_ROOT:-${PROJECT_DIR}/benchmarks/modnet-kan-resumable}"
 TRIAL_TIMEOUT_MINUTES="${TRIAL_TIMEOUT_MINUTES:-180}"
-MODEL_FAMILIES_STRING="${MODEL_FAMILIES:-mlp hybrid-fastkan hybrid-spline}"
+NUM_RANDOM_TRIALS="${NUM_RANDOM_TRIALS:-12}"
+MODEL_FAMILIES_STRING="${MODEL_FAMILIES:-mlp fastkan spline}"
 read -r -a MODEL_FAMILIES_ARRAY <<< "$MODEL_FAMILIES_STRING"
 
 source "$CONDA_PATH"
@@ -77,8 +78,8 @@ conda run --no-capture-output -n "$KAN_ENV" \
     --inner-folds 5 \
     --final-folds 0 1 2 3 4 \
     --search-space random \
-    --num-random-trials 8 \
-    --max-trials-per-family 8 \
+    --num-random-trials "$NUM_RANDOM_TRIALS" \
+    --max-trials-per-family "$NUM_RANDOM_TRIALS" \
     --metric auto \
     --tune-epochs 80 \
     --final-epochs 300 \
@@ -88,8 +89,10 @@ conda run --no-capture-output -n "$KAN_ENV" \
     --loss-candidates mae rmse \
     --activation elu \
     --kan-l1-lambda 0 \
+    --kan-sparsity-mode edge-group \
     --prune-kan-fraction-candidates 0 \
     --posthoc-prune-kan-fraction 0.3 \
+    --posthoc-kan-sparsity-lambda 1e-4 \
     --prune-mode edge \
     --prune-finetune-epochs 20 \
     --scaler minmax \
