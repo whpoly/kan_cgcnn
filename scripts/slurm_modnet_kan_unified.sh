@@ -21,7 +21,7 @@ OFFICIAL_RETRY_N_JOBS="${OFFICIAL_RETRY_N_JOBS:-1}"
 OFFICIAL_MAX_TASK_ATTEMPTS="${OFFICIAL_MAX_TASK_ATTEMPTS:-2}"
 OFFICIAL_TASK_TIMEOUT_MINUTES="${OFFICIAL_TASK_TIMEOUT_MINUTES:-1440}"
 OFFICIAL_HEARTBEAT_SECONDS="${OFFICIAL_HEARTBEAT_SECONDS:-60}"
-TRIAL_TIMEOUT_MINUTES="${TRIAL_TIMEOUT_MINUTES:-180}"
+TRIAL_TIMEOUT_MINUTES="${TRIAL_TIMEOUT_MINUTES:-720}"
 
 ALL_TASKS=(
   matbench_dielectric
@@ -108,12 +108,20 @@ for task in "${TASKS[@]}"; do
     --num-random-trials 12 \
     --max-trials-per-family 12 \
     --metric auto \
-    --tune-epochs 80 \
-    --final-epochs 300 \
+    --n-feature-candidates 16 32 64 128 \
+    --kan-grid-size-candidates 2 3 5 \
+    --kan-spline-order-candidates 2 3 \
+    --lr-candidates 0.001 0.005 0.01 \
+    --weight-decay-candidates 0 \
+    --dropout-candidates 0 \
+    --tune-epochs 1000 \
+    --final-epochs 1000 \
     --batch-size 64 \
     --val-ratio 0.1 \
-    --early-stopping-patience 60 \
-    --loss-candidates mae rmse \
+    --early-stopping-patience 100 \
+    --early-stopping-monitor loss \
+    --early-stopping-min-delta 0.001 \
+    --loss-candidates mae \
     --activation elu \
     --kan-l1-lambda 0 \
     --kan-sparsity-mode edge-group \

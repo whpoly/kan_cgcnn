@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gzip
 import itertools
 import json
 import math
@@ -12,7 +13,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from statistics import mean, median, stdev
+from statistics import mean, stdev
 from typing import Any
 
 
@@ -56,6 +57,9 @@ MAXIMIZE_METRICS = {
     "test_f1",
     "test_rocauc",
 }
+OFFICIAL_MATBENCH_EPOCHS = 1000
+OFFICIAL_MATBENCH_EARLY_STOPPING_PATIENCE = 100
+OFFICIAL_MATBENCH_EARLY_STOPPING_MIN_DELTA = 0.001
 
 
 def parse_args() -> argparse.Namespace:
@@ -77,8 +81,9 @@ def parse_args() -> argparse.Namespace:
         choices=["matbench-nested", "legacy-global"],
         default="matbench-nested",
         help=(
-            "matbench-nested tunes independently inside every outer Matbench fold; "
-            "legacy-global is retained only for reproducing older exploratory runs."
+            "matbench-nested tunes KAN parameters independently inside every outer "
+            "Matbench fold while reusing the official MLP preset; legacy-global is "
+            "retained only for reproducing older exploratory runs."
         ),
     )
     parser.add_argument("--inner-folds", type=int, default=5)
@@ -143,7 +148,7 @@ def parse_args() -> argparse.Namespace:
         "--loss-candidates",
         nargs="+",
         choices=["mae", "rmse", "mse", "bce"],
-        default=["mae", "rmse"],
+        default=["mae"],
     )
     parser.add_argument(
         "--prune-kan-fraction-candidates",
@@ -182,11 +187,49 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scaler", choices=["minmax", "standard", "none"], default="minmax")
     parser.add_argument("--target-scale", choices=["none", "standard"], default="none")
     parser.add_argument("--impute-strategy", default="median")
-    parser.add_argument("--tune-epochs", type=int, default=80)
-    parser.add_argument("--final-epochs", type=int, default=300)
+    parser.add_argument(
+        "--tune-epochs",
+        type=int,
+        default=OFFICIAL_MATBENCH_EPOCHS,
+        help="Maximum KAN tuning epochs; official MODNet fit_preset uses 1000.",
+    )
+    parser.add_argument(
+        "--final-epochs",
+        type=int,
+        default=OFFICIAL_MATBENCH_EPOCHS,
+        help="Maximum final KAN epochs; official MODNet fit_preset uses 1000.",
+    )
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--val-ratio", type=float, default=0.1)
-    parser.add_argument("--early-stopping-patience", type=int, default=60)
+    parser.add_argument(
+        "--early-stopping-patience",
+        type=int,
+        default=OFFICIAL_MATBENCH_EARLY_STOPPING_PATIENCE,
+    )
+    parser.add_argument(
+        "--early-stopping-monitor",
+        choices=["validation", "loss", "none"],
+        default="loss",
+        help="Strict Matbench mode follows MODNet fit_preset and monitors training loss.",
+    )
+    parser.add_argument(
+        "--early-stopping-min-delta",
+        type=float,
+        default=OFFICIAL_MATBENCH_EARLY_STOPPING_MIN_DELTA,
+    )
+    parser.add_argument(
+        "--restore-best-state",
+        action="store_true",
+        help=(
+            "Restore the best validation checkpoint. Disabled by default because "
+            "official MODNet fit_preset sets restore_best_weights=False."
+        ),
+    )
+    parser.add_argument(
+        "--allow-non-matbench-epochs",
+        action="store_true",
+        help="Debug-only override for strict nested runs with epoch settings other than 1000.",
+    )
     parser.add_argument(
         "--tune-train-size",
         type=int,
@@ -342,17 +385,18 @@ def candidate_space(args: argparse.Namespace, family: str) -> dict[str, list[Any
             # the much wider MODNet MLP shape would violate the parameter
             # budget.  Zero skips a hierarchy block, allowing direct and
             # shallow compact KANs in the same nested search.
-            # Match the MLP descriptor-count candidates. Parameter savings
-            # must come from the compact neural topology, not fewer inputs.
-            "n_features": [256, 512],
+            # Always take a prefix of the official fold-specific MODNet
+            # descriptor ranking, but allow KAN to demonstrate that it can
+            # retain accuracy with materially fewer inputs.
+            "n_features": [16, 32, 64, 128],
             "common_dim": [0, 16, 32, 64],
             "group_dim": [0, 8, 16, 32],
             "property_dim": [0, 8, 16],
             "target_dim": [0, 4, 8, 16],
             "kan_grid_size": [2, 3, 5],
             "kan_spline_order": [2, 3],
-            "lr": [3e-4, 1e-3, 2e-3],
-            "weight_decay": [0.0, 1e-6],
+            "lr": [1e-3, 5e-3, 1e-2],
+            "weight_decay": [0.0],
             "dropout": [0.0],
             "prune_kan_fraction": [0.0],
         }
@@ -375,6 +419,10 @@ def candidate_space(args: argparse.Namespace, family: str) -> dict[str, list[Any
 def make_trials(args: argparse.Namespace) -> list[dict[str, Any]]:
     trials = []
     for family in args.model_families:
+        if family == "mlp" and args.protocol == "matbench-nested":
+            # The completed official run already selected one fold-specific
+            # MLP preset. It is loaded inside run_nested_protocol.
+            continue
         if args.search_space == "grid":
             family_trials = grid_trials(args, family)
         elif args.search_space == "random":
@@ -406,6 +454,32 @@ def compact_trials(args: argparse.Namespace, family: str) -> list[dict[str, Any]
     ]
     trials: dict[str, dict[str, Any]] = {}
     prune_values = [0.0] if family == "mlp" else space["prune_kan_fraction"]
+    if is_full_kan_family(family):
+        # Guarantee descriptor-count coverage before adding topology variants.
+        # With all hierarchy blocks skipped, the KAN output head maps the
+        # selected official descriptor prefix directly to the target.
+        for index, n_features in enumerate(space["n_features"]):
+            descriptor_spec = (
+                n_features,
+                0,
+                0,
+                0,
+                0,
+                space["kan_grid_size"][index % len(space["kan_grid_size"])],
+                space["kan_spline_order"][index % len(space["kan_spline_order"])],
+                space["lr"][index % len(space["lr"])],
+                space["weight_decay"][0],
+                space["dropout"][0],
+            )
+            for loss in space["loss"]:
+                for prune_fraction in prune_values:
+                    trial = make_trial(
+                        family,
+                        *descriptor_spec,
+                        loss,
+                        prune_fraction,
+                    )
+                    trials[trial["trial_id"]] = trial
     for spec in base_specs:
         for loss in space["loss"]:
             for prune_fraction in prune_values:
@@ -532,6 +606,169 @@ def make_trial(
     }
 
 
+def _official_hidden_dim(block: Any, block_name: str) -> int:
+    if not isinstance(block, list) or len(block) != 1:
+        raise ValueError(
+            f"Official MODNet v0.1.12 preset block {block_name!r} must contain "
+            f"one hidden width, got {block!r}"
+        )
+    return int(block[0])
+
+
+def load_official_mlp_trial(
+    args: argparse.Namespace,
+    outer_fold: int,
+) -> dict[str, Any]:
+    """Build one fixed MLP trial from the completed official fold result.
+
+    This deliberately does not generate or rank any new MLP candidates.  The
+    preset was already selected inside the official MODNet Matbench run.
+    """
+
+    if not args.precomputed_feature_dir:
+        raise ValueError(
+            "Strict nested MLP comparison requires --precomputed-feature-dir so the "
+            "fold-specific official MODNet best_preset can be reused."
+        )
+    feature_root = Path(args.precomputed_feature_dir)
+    metadata_path = feature_root / f"fold_{outer_fold}" / "metadata.json"
+    preset: dict[str, Any] | None = None
+    if metadata_path.exists():
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        candidate = metadata.get("official_best_preset")
+        if isinstance(candidate, dict):
+            preset = candidate
+
+    fold_results_path = (
+        feature_root.parent / f"official-modnet-fold-results-{args.dataset}.csv"
+    )
+    if preset is None and fold_results_path.exists():
+        with fold_results_path.open(newline="", encoding="utf-8") as handle:
+            for row in csv.DictReader(handle):
+                if int(row["fold"]) != outer_fold or not row.get("best_preset"):
+                    continue
+                candidate = json.loads(row["best_preset"])
+                if isinstance(candidate, dict):
+                    preset = candidate
+                break
+    if preset is None:
+        raise FileNotFoundError(
+            f"No official best_preset for outer fold {outer_fold}. Expected it in "
+            f"{metadata_path} or {fold_results_path}. Re-run the official export "
+            "stage with --export-feature-folds."
+        )
+
+    required = {"n_feat", "num_neurons", "lr", "batch_size", "epochs", "loss", "act"}
+    missing = sorted(required.difference(preset))
+    if missing:
+        raise ValueError(f"Official best_preset is missing: {', '.join(missing)}")
+    blocks = preset["num_neurons"]
+    if not isinstance(blocks, list) or len(blocks) != 4:
+        raise ValueError(f"Invalid official num_neurons: {blocks!r}")
+
+    trial = make_trial(
+        "mlp",
+        int(preset["n_feat"]),
+        _official_hidden_dim(blocks[0], "common"),
+        _official_hidden_dim(blocks[1], "group"),
+        _official_hidden_dim(blocks[2], "property"),
+        _official_hidden_dim(blocks[3], "target"),
+        0,
+        0,
+        float(preset["lr"]),
+        0.0,
+        0.0,
+        str(preset["loss"]),
+        0.0,
+    )
+    trial.update(
+        {
+            "trial_id": f"mlp_official_best_preset_outer{outer_fold}",
+            "activation": str(preset["act"]),
+            "batch_size": int(preset["batch_size"]),
+            "epochs": int(preset["epochs"]),
+            # EnsembleMODNetModel.fit_preset in v0.1.12 does not forward the
+            # preset xscale into its task dictionary, so its effective scaler
+            # is _validate_ensemble_model's minmax default.
+            "scaler": "minmax",
+            "declared_preset_scaler": str(preset.get("xscale", "minmax")),
+            "preset_source": "official_modnet_v0.1.12_best_preset",
+            "mlp_hyperparameter_selection": "reused_official_result",
+        }
+    )
+    if (
+        trial["epochs"] != OFFICIAL_MATBENCH_EPOCHS
+        and not args.allow_non_matbench_epochs
+    ):
+        raise ValueError(
+            f"Official fold {outer_fold} preset has epochs={trial['epochs']}, expected "
+            f"{OFFICIAL_MATBENCH_EPOCHS}. This normally means the official run used --fast."
+        )
+    return trial
+
+
+def fixed_mlp_reference_summary(
+    args: argparse.Namespace,
+    outer_fold: int,
+    trial: dict[str, Any],
+    task_type: str,
+) -> dict[str, Any]:
+    """Count the fixed PyTorch MLP reference without running inner MLP folds."""
+
+    from cgcnn_pyg_kan.modnet import MODNetKAN
+
+    target_path = (
+        Path(args.precomputed_feature_dir)
+        / f"fold_{outer_fold}"
+        / "train_targets.csv.gz"
+    )
+    if not target_path.exists():
+        raise FileNotFoundError(f"Missing official target export: {target_path}")
+    with gzip.open(target_path, "rt", newline="", encoding="utf-8") as handle:
+        header = next(csv.reader(handle))
+    target_names = [str(name) for name in header[1:] if str(name)]
+    if not target_names:
+        raise ValueError(f"Could not read target names from {target_path}")
+
+    model = MODNetKAN(
+        n_feat=int(trial["n_features"]),
+        targets=[[target_names]],
+        num_neurons=(
+            [int(trial["common_dim"])],
+            [int(trial["group_dim"])],
+            [int(trial["property_dim"])],
+            [int(trial["target_dim"])],
+        ),
+        block_type="mlp",
+        block_types=("mlp", "mlp", "mlp", "mlp"),
+        output_head_type="linear",
+        mlp_activation=str(trial["activation"]),
+        dropout=0.0,
+    )
+    params = sum(parameter.numel() for parameter in model.parameters())
+    return {
+        **trial,
+        "dataset": args.dataset,
+        "outer_fold": outer_fold,
+        "selection_metric": args.metric,
+        "task_type": task_type,
+        "inner_folds": 0,
+        "folds": 0,
+        "params_mean": float(params),
+        "effective_params_mean": float(params),
+        "effective_params_std": 0.0,
+        "pruned_params_mean": 0.0,
+        "params_before_prune_mean": float(params),
+        "params_after_prune_mean": float(params),
+        "params_after_prune_std": 0.0,
+        "params_pruned_mean": 0.0,
+        "params_pruned_pct_mean": 0.0,
+        "pruned_edges_mean": 0.0,
+        "total_kan_edges_mean": 0.0,
+        "reference_role": "fixed official preset; excluded from new inner-CV search",
+    }
+
+
 def format_float_id(value: float) -> str:
     return f"{value:g}".replace("-", "m").replace(".", "p")
 
@@ -578,7 +815,7 @@ def benchmark_command(
         "--kan-spline-order",
         str(max(1, int(trial["kan_spline_order"]))),
         "--scaler",
-        args.scaler,
+        str(trial.get("scaler", args.scaler)),
         "--target-scale",
         args.target_scale,
         "--impute-strategy",
@@ -606,15 +843,19 @@ def benchmark_command(
         "--kan-sparsity-mode",
         args.kan_sparsity_mode,
         "--activation",
-        args.activation,
+        str(trial.get("activation", args.activation)),
         "--epochs",
         str(epochs),
         "--batch-size",
-        str(args.batch_size),
+        str(trial.get("batch_size", args.batch_size)),
         "--val-ratio",
         str(args.val_ratio if val_ratio_override is None else val_ratio_override),
         "--early-stopping-patience",
         str(args.early_stopping_patience),
+        "--early-stopping-monitor",
+        str(args.early_stopping_monitor),
+        "--early-stopping-min-delta",
+        str(args.early_stopping_min_delta),
         "--lr",
         str(trial["lr"]),
         "--weight-decay",
@@ -628,6 +869,8 @@ def benchmark_command(
         "--output-dir",
         str(output_dir),
     ]
+    if not args.restore_best_state:
+        cmd.append("--no-restore-best-state")
     if args.precomputed_feature_dir:
         cmd.extend(["--precomputed-feature-dir", args.precomputed_feature_dir])
     else:
@@ -765,10 +1008,75 @@ def command_option(cmd: list[str], option: str) -> str | None:
     return cmd[index + 1] if index + 1 < len(cmd) else None
 
 
+def command_option_values(cmd: list[str], option: str) -> list[str]:
+    try:
+        index = cmd.index(option) + 1
+    except ValueError:
+        return []
+    values = []
+    while index < len(cmd) and not cmd[index].startswith("--"):
+        values.append(cmd[index])
+        index += 1
+    return values
+
+
 def resume_payload_matches_command(payload: dict[str, Any], cmd: list[str]) -> bool:
-    """Reject stale sparse/non-sparse results when --resume is enabled."""
+    """Reject stale results when --resume is enabled."""
 
     payload_args = payload.get("args", {})
+    scalar_options: dict[str, tuple[str, type]] = {
+        "--epochs": ("epochs", int),
+        "--batch-size": ("batch_size", int),
+        "--n-features": ("n_features", int),
+        "--kan-grid-size": ("kan_grid_size", int),
+        "--kan-spline-order": ("kan_spline_order", int),
+        "--early-stopping-patience": ("early_stopping_patience", int),
+        "--early-stopping-monitor": ("early_stopping_monitor", str),
+        "--early-stopping-min-delta": ("early_stopping_min_delta", float),
+        "--lr": ("lr", float),
+        "--weight-decay": ("weight_decay", float),
+        "--loss": ("loss", str),
+        "--scaler": ("scaler", str),
+        "--activation": ("activation", str),
+        "--val-ratio": ("val_ratio", float),
+        "--seed": ("seed", int),
+    }
+    for option, (payload_key, value_type) in scalar_options.items():
+        expected_text = command_option(cmd, option)
+        if expected_text is None:
+            continue
+        actual = payload_args.get(payload_key)
+        if actual is None:
+            return False
+        expected = value_type(expected_text)
+        if value_type is float:
+            if not math.isclose(float(actual), float(expected), rel_tol=0.0, abs_tol=1e-15):
+                return False
+        elif value_type(actual) != expected:
+            return False
+
+    for option, payload_key in {
+        "--models": "models",
+        "--common-dims": "common_dims",
+        "--group-dims": "group_dims",
+        "--property-dims": "property_dims",
+        "--target-dims": "target_dims",
+        "--folds": "folds",
+    }.items():
+        expected_values = command_option_values(cmd, option)
+        if not expected_values:
+            continue
+        actual_values = payload_args.get(payload_key)
+        if actual_values is None:
+            return False
+        if [str(value) for value in actual_values] != expected_values:
+            return False
+
+    if "--no-restore-best-state" in cmd or "--restore-best-state" in cmd:
+        expected_restore = "--no-restore-best-state" not in cmd
+        if payload_args.get("restore_best_state") is not expected_restore:
+            return False
+
     expected_lambda_text = command_option(cmd, "--kan-l1-lambda")
     expected_lambda = float(expected_lambda_text or 0.0)
     actual_lambda = safe_float(payload_args.get("kan_l1_lambda", 0.0))
@@ -817,6 +1125,16 @@ def summarize_trial(
                     "train_seconds": safe_float(result["train_seconds"]),
                     "forward_ms_per_batch": safe_float(result["forward_ms_per_batch"]),
                     "best_epoch": int(result.get("best_epoch", 0)),
+                    "epochs_ran": int(result.get("epochs_ran", result.get("best_epoch", 0))),
+                    "max_epochs": int(result.get("max_epochs", 0)),
+                    "early_stopping_monitor": result.get("early_stopping_monitor", ""),
+                    "early_stopping_min_delta": safe_float(
+                        result.get("early_stopping_min_delta", 0.0)
+                    ),
+                    "early_stopping_patience": int(
+                        result.get("early_stopping_patience", 0)
+                    ),
+                    "restore_best_state": bool(result.get("restore_best_state", True)),
                     "inner_fold": result.get("inner_fold", ""),
                     **{
                         f"{prefix}_{metric}": safe_float(result.get(f"{prefix}_{metric}"))
@@ -848,6 +1166,7 @@ def summarize_trial(
         *[f"{prefix}_{name}" for prefix in ("best_val", "test") for name in METRIC_NAMES],
         "train_seconds",
         "forward_ms_per_batch",
+        "epochs_ran",
     ):
         values = [safe_float(row[metric]) for row in rows]
         finite_values = [value for value in values if math.isfinite(value)]
@@ -1100,6 +1419,13 @@ def ordered_fieldnames(rows: list[dict[str, Any]]) -> list[str]:
         "weight_decay",
         "dropout",
         "loss",
+        "max_epochs",
+        "epochs_ran",
+        "epochs_ran_mean",
+        "early_stopping_monitor",
+        "early_stopping_min_delta",
+        "early_stopping_patience",
+        "restore_best_state",
         "train_seconds",
         "train_seconds_mean",
         "forward_ms_per_batch",
@@ -1134,6 +1460,8 @@ def aggregate_nested_final_rows(
         "train_seconds",
         "forward_ms_per_batch",
         "selected_epochs",
+        "max_epochs",
+        "epochs_ran",
         "n_features",
     }
     for (family, variant), family_rows in grouped.items():
@@ -1183,6 +1511,54 @@ def aggregate_nested_final_rows(
                 summary[f"{path_key}s"] = ";".join(paths)
         summaries.append(summary)
     return summaries
+
+
+def aggregate_n_feature_curve(
+    rows: list[dict[str, Any]],
+    metric: str,
+) -> list[dict[str, Any]]:
+    """Best inner-CV configuration per outer fold and KAN descriptor count."""
+
+    metric_key = f"{metric}_mean"
+    per_fold: dict[tuple[str, int, int], list[dict[str, Any]]] = {}
+    for row in rows:
+        family = str(row.get("model_family", ""))
+        if family == "mlp" or not row.get("n_features"):
+            continue
+        key = (family, int(row["n_features"]), int(row["outer_fold"]))
+        per_fold.setdefault(key, []).append(row)
+
+    grouped: dict[tuple[str, int], list[dict[str, Any]]] = {}
+    for (family, n_features, _), candidates in per_fold.items():
+        best = min(
+            candidates,
+            key=lambda row: metric_sort_value(row.get(metric_key), metric),
+        )
+        grouped.setdefault((family, n_features), []).append(best)
+
+    curve = []
+    for (family, n_features), selected in sorted(grouped.items()):
+        metrics = [safe_float(row.get(metric_key)) for row in selected]
+        metrics = [value for value in metrics if math.isfinite(value)]
+        params = [
+            safe_float(row.get("effective_params_mean", row.get("params_mean")))
+            for row in selected
+        ]
+        params = [value for value in params if math.isfinite(value)]
+        curve.append(
+            {
+                "model_family": family,
+                "n_features": n_features,
+                "outer_folds": len(selected),
+                f"best_inner_{metric}_mean": mean(metrics) if metrics else float("nan"),
+                f"best_inner_{metric}_std": stdev(metrics) if len(metrics) > 1 else 0.0,
+                "effective_params_mean": mean(params) if params else float("nan"),
+                "selected_trial_ids": ";".join(
+                    str(row.get("trial_id", "")) for row in selected
+                ),
+            }
+        )
+    return curve
 
 
 def annotate_against_mlp(
@@ -1327,6 +1703,14 @@ def run_nested_protocol(
             "Pruning is not a strict tuning parameter. Use only "
             "--prune-kan-fraction-candidates 0 and set --posthoc-prune-kan-fraction."
         )
+    if not args.allow_non_matbench_epochs and (
+        args.tune_epochs != OFFICIAL_MATBENCH_EPOCHS
+        or args.final_epochs != OFFICIAL_MATBENCH_EPOCHS
+    ):
+        raise ValueError(
+            "Strict Matbench nested runs require --tune-epochs 1000 and "
+            "--final-epochs 1000. Use --allow-non-matbench-epochs only for debugging."
+        )
 
     print("Protocol: strict Matbench outer CV with independent inner CV", flush=True)
     print(f"Outer folds: {args.final_folds}", flush=True)
@@ -1338,7 +1722,14 @@ def run_nested_protocol(
                     "protocol": "matbench-nested",
                     "outer_folds": args.final_folds,
                     "inner_folds": args.inner_folds,
-                    "trials": trials,
+                    "kan_trials": [
+                        trial for trial in trials if trial["model_family"] != "mlp"
+                    ],
+                    "mlp": (
+                        "one fold-specific official best_preset loaded at runtime"
+                        if "mlp" in args.model_families
+                        else "not requested"
+                    ),
                 },
                 indent=2,
             )
@@ -1357,7 +1748,30 @@ def run_nested_protocol(
         print(f"\n######## OUTER MATBENCH FOLD {outer_fold} ########", flush=True)
         outer_summaries: list[dict[str, Any]] = []
         outer_rows: list[dict[str, Any]] = []
-        for trial in trials:
+        outer_trials = [trial for trial in trials if trial["model_family"] != "mlp"]
+        if "mlp" in args.model_families:
+            fixed_mlp_trial = load_official_mlp_trial(args, outer_fold)
+            outer_summaries.append(
+                fixed_mlp_reference_summary(
+                    args,
+                    outer_fold,
+                    fixed_mlp_trial,
+                    task_type,
+                )
+            )
+            print(
+                "Fixed MLP reference (no new MLP search): "
+                f"{fixed_mlp_trial['trial_id']} / n_feat={fixed_mlp_trial['n_features']} / "
+                f"dims={fixed_mlp_trial['common_dim']}-"
+                f"{fixed_mlp_trial['group_dim']}-"
+                f"{fixed_mlp_trial['property_dim']}-"
+                f"{fixed_mlp_trial['target_dim']} / "
+                f"lr={fixed_mlp_trial['lr']} / "
+                f"batch={fixed_mlp_trial['batch_size']} / "
+                f"epochs={fixed_mlp_trial['epochs']}",
+                flush=True,
+            )
+        for trial in outer_trials:
             inner_payloads = []
             trial_failed = False
             for inner_fold in range(args.inner_folds):
@@ -1374,7 +1788,7 @@ def run_nested_protocol(
                     args,
                     trial,
                     folds=[outer_fold],
-                    epochs=args.tune_epochs,
+                    epochs=int(trial.get("epochs", args.tune_epochs)),
                     output_dir=trial_dir,
                     train_size=None,
                     test_size=None,
@@ -1482,17 +1896,10 @@ def run_nested_protocol(
         best_by_outer_fold[str(outer_fold)] = {}
         final_commands[str(outer_fold)] = {}
         for family, selected in selected_by_family.items():
-            matching_epochs = [
-                int(row.get("best_epoch", 0))
-                for row in outer_rows
-                if row.get("trial_id") == selected.get("trial_id")
-                and int(row.get("best_epoch", 0)) > 0
-            ]
-            selected_epochs = (
-                max(1, min(args.final_epochs, int(round(median(matching_epochs)))))
-                if matching_epochs
-                else args.final_epochs
-            )
+            # Official MODNet refits with the preset maximum epoch count and
+            # the same loss-based EarlyStopping callback. Do not convert inner
+            # best epochs into a new final-training hyperparameter.
+            selected_epochs = int(selected.get("epochs", args.final_epochs))
             selected_result = dict(selected)
             selected_result["selected_epochs"] = selected_epochs
             selected_result["outer_fold"] = outer_fold
@@ -1513,6 +1920,12 @@ def run_nested_protocol(
                 "loss",
                 "prune_kan_fraction",
                 "activation",
+                "batch_size",
+                "epochs",
+                "scaler",
+                "declared_preset_scaler",
+                "preset_source",
+                "mlp_hyperparameter_selection",
             }
             selected = {key: selected_result[key] for key in trial_keys if key in selected_result}
             selected["selected_epochs"] = selected_epochs
@@ -1654,6 +2067,8 @@ def run_nested_protocol(
 
     write_csv(output_dir / f"nested-tuning-fold-results-{args.dataset}.csv", all_inner_rows)
     write_csv(output_dir / f"nested-tuning-summary-{args.dataset}.csv", all_inner_summaries)
+    n_feature_curve = aggregate_n_feature_curve(all_inner_summaries, args.metric)
+    write_csv(output_dir / f"kan-n-feature-curve-{args.dataset}.csv", n_feature_curve)
     final_summary = annotate_against_mlp(
         aggregate_nested_final_rows(final_rows, args.dataset, task_type),
         task_type,
@@ -1674,8 +2089,9 @@ def run_nested_protocol(
         "task_type": task_type,
         "protocol": "matbench-nested",
         "protocol_description": (
-            "Five predefined Matbench outer folds; independent inner CV and model "
-            "selection inside each outer train+validation partition; outer test used once."
+            "Five predefined Matbench outer folds; KAN-only inner CV and model "
+            "selection inside each outer train+validation partition; the fixed MLP "
+            "preset is reused from the completed official MODNet run; outer test used once."
         ),
         "outer_folds": args.final_folds,
         "inner_folds": args.inner_folds,
@@ -1683,6 +2099,32 @@ def run_nested_protocol(
         "architecture_goal": (
             "Nested-select compact all-KAN networks under the selected MLP parameter "
             "budget; outer-test performance is reported without selection leakage."
+        ),
+        "shared_training_protocol": {
+            "max_epochs": args.final_epochs,
+            "early_stopping_monitor": args.early_stopping_monitor,
+            "early_stopping_min_delta": args.early_stopping_min_delta,
+            "early_stopping_patience": args.early_stopping_patience,
+            "restore_best_state": args.restore_best_state,
+            "loss_candidates": args.loss_candidates,
+            "activation": args.activation,
+            "scaler": args.scaler,
+            "target_scale": args.target_scale,
+        },
+        "kan_n_feature_candidates": sorted(
+            {
+                int(trial["n_features"])
+                for trial in trials
+                if trial["model_family"] != "mlp"
+            }
+        ),
+        "kan_n_feature_curve": n_feature_curve,
+        "descriptor_policy": (
+            "Each n_feat is the first N columns of the official fold-specific MODNet "
+            "descriptor ranking; no KAN-specific feature reranking."
+        ),
+        "mlp_hyperparameter_policy": (
+            "No new MLP search; reuse each outer fold's official MODNet best_preset."
         ),
         "pruning_role": "fixed post-hoc interpretation only",
         "posthoc_prune_kan_fraction": args.posthoc_prune_kan_fraction,
@@ -1715,6 +2157,12 @@ def run_nested_protocol(
 
 def main() -> None:
     args = parse_args()
+    if args.tune_epochs < 1 or args.final_epochs < 1:
+        raise ValueError("--tune-epochs and --final-epochs must be positive")
+    if args.early_stopping_patience < 0:
+        raise ValueError("--early-stopping-patience must be non-negative")
+    if args.early_stopping_min_delta < 0:
+        raise ValueError("--early-stopping-min-delta must be non-negative")
     if args.prune_finetune_epochs < 0:
         raise ValueError("--prune-finetune-epochs must be non-negative")
     if args.kan_l1_lambda < 0:

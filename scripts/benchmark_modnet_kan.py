@@ -255,6 +255,23 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--inner-n-splits", type=int, default=5)
     parser.add_argument("--early-stopping-patience", type=int, default=30)
+    parser.add_argument(
+        "--early-stopping-monitor",
+        choices=["validation", "loss", "none"],
+        default="validation",
+    )
+    parser.add_argument("--early-stopping-min-delta", type=float, default=0.0)
+    parser.set_defaults(restore_best_state=True)
+    parser.add_argument(
+        "--restore-best-state",
+        dest="restore_best_state",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--no-restore-best-state",
+        dest="restore_best_state",
+        action="store_false",
+    )
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=0.0)
     parser.add_argument("--train-size", type=int, default=None)
@@ -1632,9 +1649,13 @@ def run_model(
         target_names=target_names,
         args=args,
     ).to(device)
-    optimizer = torch.optim.AdamW(
-        adamw_parameter_groups(model, args.weight_decay),
-        lr=args.lr,
+    optimizer = (
+        torch.optim.Adam(model.parameters(), lr=args.lr)
+        if args.weight_decay == 0
+        else torch.optim.AdamW(
+            adamw_parameter_groups(model, args.weight_decay),
+            lr=args.lr,
+        )
     )
     train_loader = make_loader(
         prepared["x_train"],
@@ -1659,6 +1680,8 @@ def run_model(
     val_metric_name = primary_val_metric(task_type)
     best_epoch = 0
     patience_left = args.early_stopping_patience
+    best_train_loss = float("inf")
+    epochs_ran = 0
     print(
         f"\n[{model_label}] fold {fold_data['metadata']['fold']} start: "
         f"features={prepared['x_train'].shape[1]}, epochs={args.epochs}",
@@ -1667,6 +1690,7 @@ def run_model(
     sync(device)
     train_start = time.perf_counter()
     for epoch in range(1, args.epochs + 1):
+        epochs_ran = epoch
         train_loss = train_one_epoch(
             model,
             train_loader,
@@ -1691,12 +1715,11 @@ def run_model(
                 best_metric = val_metrics[val_metric_name]
                 best_val_metrics = val_metrics
                 best_epoch = epoch
-                best_state = {
-                    key: value.detach().cpu().clone() for key, value in model.state_dict().items()
-                }
-                patience_left = args.early_stopping_patience
-            else:
-                patience_left -= 1
+                if args.restore_best_state:
+                    best_state = {
+                        key: value.detach().cpu().clone()
+                        for key, value in model.state_dict().items()
+                    }
 
             if args.log_every_epochs > 0 and (
                 epoch % args.log_every_epochs == 0 or epoch == 1 or epoch == args.epochs
@@ -1708,18 +1731,59 @@ def run_model(
                     f"best_val_{val_metric_name}={best_metric:.6g}",
                     flush=True,
                 )
-            if args.early_stopping_patience > 0 and patience_left <= 0:
-                print(f"[{model_label}] early stop at epoch {epoch}", flush=True)
-                break
         elif args.log_every_epochs > 0 and (
             epoch % args.log_every_epochs == 0 or epoch == 1 or epoch == args.epochs
         ):
             print(f"[{model_label}] epoch {epoch}/{args.epochs} train_loss={train_loss:.6g}", flush=True)
+
+        monitor_improved = False
+        if args.early_stopping_monitor == "validation" and val_loader is not None:
+            monitor_improved = improved
+        elif args.early_stopping_monitor == "validation":
+            # A final fit with val_ratio=0 has no validation signal, so keep
+            # the historical fixed-epoch behaviour for this monitor.
+            monitor_improved = True
+        elif args.early_stopping_monitor == "loss":
+            monitor_improved = train_loss < (
+                best_train_loss - float(args.early_stopping_min_delta)
+            )
+            if monitor_improved:
+                best_train_loss = train_loss
+        elif args.early_stopping_monitor == "none":
+            monitor_improved = True
+
+        if monitor_improved:
+            patience_left = args.early_stopping_patience
+        elif args.early_stopping_monitor != "none":
+            patience_left -= 1
+        if (
+            args.early_stopping_monitor != "none"
+            and args.early_stopping_patience > 0
+            and patience_left <= 0
+        ):
+            print(
+                f"[{model_label}] early stop at epoch {epoch} "
+                f"(monitor={args.early_stopping_monitor})",
+                flush=True,
+            )
+            break
     sync(device)
     train_seconds = time.perf_counter() - train_start
 
-    if best_state is not None:
+    if args.restore_best_state and best_state is not None:
         model.load_state_dict(best_state)
+    elif val_loader is not None:
+        # MODNet fit_preset uses restore_best_weights=False and ranks the model
+        # left at the end of loss-based early stopping on held-out data.
+        best_val_metrics = evaluate(
+            model,
+            val_loader,
+            prepared["target_scaler"],
+            device,
+            task_type,
+            target_names=target_names,
+        )
+        best_epoch = epochs_ran
     params = count_parameters(model)
     pruning_masks = PruningMasks()
     prune_finetune_seconds = 0.0
@@ -1735,9 +1799,13 @@ def run_model(
             flush=True,
         )
         if args.prune_finetune_epochs > 0:
-            finetune_optimizer = torch.optim.AdamW(
-                adamw_parameter_groups(model, args.weight_decay),
-                lr=args.lr * 0.1,
+            finetune_optimizer = (
+                torch.optim.Adam(model.parameters(), lr=args.lr * 0.1)
+                if args.weight_decay == 0
+                else torch.optim.AdamW(
+                    adamw_parameter_groups(model, args.weight_decay),
+                    lr=args.lr * 0.1,
+                )
             )
             prune_best_state = {
                 key: value.detach().cpu().clone() for key, value in model.state_dict().items()
@@ -1885,6 +1953,12 @@ def run_model(
         "weight_decay": args.weight_decay,
         "loss": args.loss,
         "best_epoch": best_epoch,
+        "epochs_ran": epochs_ran,
+        "max_epochs": args.epochs,
+        "early_stopping_monitor": args.early_stopping_monitor,
+        "early_stopping_min_delta": args.early_stopping_min_delta,
+        "early_stopping_patience": args.early_stopping_patience,
+        "restore_best_state": args.restore_best_state,
         "train_seconds": train_seconds,
         "forward_ms_per_batch": forward_ms,
     }
@@ -3040,7 +3114,13 @@ def ordered_fieldnames(rows: list[dict[str, Any]]) -> list[str]:
         "lr",
         "weight_decay",
         "loss",
+        "max_epochs",
+        "epochs_ran",
         "best_epoch",
+        "early_stopping_monitor",
+        "early_stopping_min_delta",
+        "early_stopping_patience",
+        "restore_best_state",
         "best_val_mae",
         "best_val_rmse",
         "best_val_r2",
@@ -3064,6 +3144,12 @@ def ordered_fieldnames(rows: list[dict[str, Any]]) -> list[str]:
 
 def main() -> None:
     args = parse_args()
+    if args.epochs < 1:
+        raise ValueError("--epochs must be positive")
+    if args.early_stopping_patience < 0:
+        raise ValueError("--early-stopping-patience must be non-negative")
+    if args.early_stopping_min_delta < 0:
+        raise ValueError("--early-stopping-min-delta must be non-negative")
     if not 0.0 <= args.prune_kan_fraction < 1.0:
         raise ValueError("--prune-kan-fraction must be in [0, 1)")
     if args.prune_finetune_epochs < 0:

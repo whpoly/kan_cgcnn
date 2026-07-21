@@ -93,7 +93,10 @@ The path must contain
 `<task>/official_feature_folds/fold_<n>/metadata.json`. To rerun only one array
 entry, use for example `sbatch --array=9 scripts/slurm_modnet_kan_array.sh`
 (`9` is `matbench_phonons`). Completed tuning trials are reused with `--resume`;
-stalled trials are terminated after `TRIAL_TIMEOUT_MINUTES` (default 180).
+stalled trials are terminated after `TRIAL_TIMEOUT_MINUTES` (default 720 in
+the unified 1000-epoch workflow). Resume validation includes epochs, network
+shape, optimizer settings, scaling, and early-stopping rules, so older 80/300
+epoch JSON files are not silently reused.
 
 The default reliable tuning protocol is:
 
@@ -102,18 +105,22 @@ The default reliable tuning protocol is:
   v0.1.12 benchmark convention: `matbench_log_gvrh` and `matbench_log_kvrh`
   are trained together as the two-output `matbench_elastic` model, then
   reported per target, covering all 13 original Matbench tasks;
-- each outer fold `0..4` independently uses five inner folds for model and
+- each outer fold `0..4` independently uses five inner folds for KAN model and
   hyperparameter selection; no configuration is shared across overlapping
   outer folds;
-- the selected inner-CV epoch count is used to refit on that outer fold's full
-  train+validation partition before its test fold is evaluated;
-- MLP tries wider hidden blocks such as `256/512` common dims;
-- MLP and full KAN both search 256/512 selected descriptors;
+- MLP is not searched again: each fold reuses the `best_preset` saved by the
+  completed official MODNet run;
+- tuning and final fitting both use the official maximum of 1000 epochs with
+  loss-based early stopping (`min_delta=0.001`, `patience=100`, no weight
+  restoration); the final epoch count is not inferred from inner folds;
+- full KAN searches 16/32/64/128 inputs, always as prefixes of the official
+  fold-specific descriptor order;
 - full KAN searches zero to four hidden KAN blocks;
   zero skips a MODNet hierarchy block, so the topology need not copy MODNet;
 - active KAN widths are non-expanding and much narrower than the MLP baseline;
-- KAN grid sizes `2`, `3`, and `5`, learning rates, MAE/RMSE losses, and architecture
-  sizes are tuned; pruning is fixed at `0.3` only in the post-hoc run;
+- KAN grid sizes `2`, `3`, and `5`, spline orders `2` and `3`, official-style
+  learning rates, and architecture sizes are tuned with MAE loss; pruning is
+  fixed at `0.3` only in the post-hoc run;
 - post-hoc formula distillation evaluates `5..10` descriptor inputs, selects
   the smallest formula within 2% of the best inner validation fidelity, and
   reports its outer-test target MAE;
@@ -257,7 +264,7 @@ single-job unified environment remains available for compatibility:
 
 ```bash
 bash scripts/setup_conda_modnet_kan.sh modnet-kan
-sbatch scripts/slurm_modnet_kan_unified.sh
+sbatch --export=ALL,TASK_SET=small,RUN_ID=my-run,OFFICIAL_N_JOBS=8,ENV_NAME=modnet-kan scripts/slurm_modnet_kan_unified.sh
 ```
 
 The PowerShell two-environment wrapper is also available:
@@ -266,10 +273,10 @@ The PowerShell two-environment wrapper is also available:
 powershell -ExecutionPolicy Bypass -File scripts\run_modnet_kan_matbench.ps1
 ```
 
-The default task set is the full MODNet Matbench benchmark, with the
+The unified `TASK_SET=small` contains the five requested tasks: dielectric,
+elastic, experimental gap, perovskites, and phonons. The full task set keeps the
 `matbench_elastic` special case: `matbench_log_gvrh` and `matbench_log_kvrh`
-are trained as one two-output model. The legacy unified mode runs official
-MODNet and the older model families inside `modnet-kan`.
+are trained as one two-output model.
 
 The official MODNet stage calls `modnet.matbench.benchmark.matbench_benchmark`
 with the documented Matbench settings: `EnsembleMODNetModel`,
@@ -373,25 +380,23 @@ Parameter tuning plus Matbench-aligned final benchmark:
 ```powershell
 python scripts/tune_modnet_kan.py `
   --dataset matbench_phonons `
-  --model-families mlp fastkan spline direct-fastkan `
+  --precomputed-feature-dir benchmarks/official-modnet-v012-small/matbench_phonons/official_feature_folds `
+  --model-families mlp fastkan spline `
   --protocol matbench-nested `
   --inner-folds 5 `
   --final-folds 0 1 2 3 4 `
   --search-space random `
-  --num-random-trials 8 `
-  --tune-epochs 80 `
-  --final-epochs 300 `
-  --featurizer-preset auto `
-  --n-feature-candidates 128 256 280 512 `
-  --common-dim-candidates 64 128 512 `
-  --group-dim-candidates 32 64 128 `
-  --property-dim-candidates 16 32 64 `
-  --kan-grid-size-candidates 3 5 `
-  --kan-spline-order-candidates 3 `
-  --lr-candidates 0.0003 0.001 0.005 `
-  --weight-decay-candidates 0 1e-6 1e-5 `
-  --dropout-candidates 0 0.05 `
-  --loss-candidates mae rmse `
+  --num-random-trials 12 `
+  --max-trials-per-family 12 `
+  --tune-epochs 1000 `
+  --final-epochs 1000 `
+  --n-feature-candidates 16 32 64 128 `
+  --kan-grid-size-candidates 2 3 5 `
+  --kan-spline-order-candidates 2 3 `
+  --lr-candidates 0.001 0.005 0.01 `
+  --weight-decay-candidates 0 `
+  --dropout-candidates 0 `
+  --loss-candidates mae `
   --prune-kan-fraction-candidates 0 `
   --posthoc-prune-kan-fraction 0.3 `
   --prune-mode edge `
@@ -407,20 +412,32 @@ python scripts/tune_modnet_kan.py `
   --target-scale none `
   --batch-size 64 `
   --val-ratio 0.1 `
-  --early-stopping-patience 60 `
+  --early-stopping-patience 100 `
+  --early-stopping-monitor loss `
+  --early-stopping-min-delta 0.001 `
   --device cuda `
   --require-cuda
 ```
 
-The tuner optimizes MLP, FastKAN, and B-spline KAN separately. `--metric auto`
-selects validation MAE for regression tasks and validation ROC-AUC for
-classification tasks; you can still force a specific `best_val_*` metric. For
-regression, `--loss-candidates mae rmse` tunes whether the training objective is
-MAE or RMSE-style MSE. Classification tasks use binary cross entropy and record
-probabilities for Matbench scoring. For every outer fold and model family, the
-tuner selects a configuration using only that fold's five inner validation
-partitions. It then refits for the median selected inner-CV epoch count on the
-full outer train+validation partition. The outer test fold is evaluated once.
+The tuner does not run a second MLP hyperparameter search. For every outer fold
+it reads the `best_preset` already selected by official MODNet v0.1.12 and uses
+that fixed MLP as the parameter/performance reference. FastKAN and B-spline KAN
+are selected independently using only that fold's five inner validation
+partitions. `--metric auto` selects validation MAE for regression tasks and
+validation ROC-AUC for classification tasks. Regression follows official
+MODNet with MAE loss. The maximum is 1000 epochs and early stopping follows
+`fit_preset`: training loss, `min_delta=0.001`, `patience=100`, and no restoration
+of earlier weights. The selected configuration is refitted on the full outer
+train+validation partition with the same rule; the outer test fold is evaluated
+once.
+
+KAN `n_feat` candidates are 16, 32, 64, and 128. Each is a prefix of the
+fold-specific official MODNet descriptor ranking; KAN never performs an
+independent descriptor reorder. The full tuning CSV therefore provides the
+`n_feat` versus validation MAE versus parameter-count curve, and the best
+configuration per input count is collected in
+`kan-n-feature-curve-<dataset>.csv`. The separate
+post-hoc formula branch still searches for a 5--10-input sparse formula.
 Final outputs include
 `final-summary-<dataset>.csv`, `final-fold-results-<dataset>.csv`, per-family
 MatbenchTask records, and `best_config.json`.
@@ -460,25 +477,25 @@ Matbench-strict all-dataset run:
 
 ```powershell
 python scripts/tune_modnet_all_matbench.py `
-  --model-families mlp fastkan spline `
+  --model-families fastkan spline `
   --protocol matbench-nested `
   --inner-folds 5 `
   --final-folds 0 1 2 3 4 `
   --search-space random `
   --num-random-trials 8 `
-  --tune-epochs 80 `
-  --final-epochs 300 `
+  --tune-epochs 1000 `
+  --final-epochs 1000 `
   --featurizer-preset auto `
-  --n-feature-candidates 128 256 280 512 `
+  --n-feature-candidates 16 32 64 128 `
   --common-dim-candidates 64 128 512 `
   --group-dim-candidates 32 64 128 `
   --property-dim-candidates 16 32 64 `
   --kan-grid-size-candidates 3 5 `
   --kan-spline-order-candidates 3 `
-  --lr-candidates 0.0003 0.001 0.005 `
-  --weight-decay-candidates 0 1e-6 1e-5 `
-  --dropout-candidates 0 0.05 `
-  --loss-candidates mae rmse `
+  --lr-candidates 0.001 0.005 0.01 `
+  --weight-decay-candidates 0 `
+  --dropout-candidates 0 `
+  --loss-candidates mae `
   --prune-kan-fraction-candidates 0 `
   --posthoc-prune-kan-fraction 0.3 `
   --kan-sparsity-mode edge-group `
@@ -488,7 +505,7 @@ python scripts/tune_modnet_all_matbench.py `
   --target-scale none `
   --batch-size 64 `
   --val-ratio 0.1 `
-  --early-stopping-patience 60 `
+  --early-stopping-patience 100 `
   --device cuda `
   --require-cuda
 ```

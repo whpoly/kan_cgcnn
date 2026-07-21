@@ -79,6 +79,11 @@ OFFICIAL_FIT_SETTINGS = {
     "loss": "mae",
     "xscale": "minmax",
 }
+# With hp_strategy="fit_preset", MODNet uses this dictionary only to satisfy
+# matbench_benchmark's fallback model-construction interface. The actual
+# candidate/final settings come from gen_presets and each fold's best_preset:
+# epochs=1000 with loss-based EarlyStopping(min_delta=0.001, patience=100,
+# restore_best_weights=False).
 
 
 def parse_args() -> argparse.Namespace:
@@ -488,6 +493,23 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     os.replace(temp_path, path)
 
 
+def load_best_presets_from_fold_csv(path: Path) -> dict[int, dict[str, Any]]:
+    """Load the fold-specific preset selected by official MODNet fit_preset."""
+
+    if not path.exists():
+        return {}
+    presets: dict[int, dict[str, Any]] = {}
+    with path.open(newline="", encoding="utf-8") as handle:
+        for row in csv.DictReader(handle):
+            raw = row.get("best_preset")
+            if not raw:
+                continue
+            preset = json.loads(raw)
+            if isinstance(preset, dict):
+                presets[int(row["fold"])] = preset
+    return presets
+
+
 def save_results_pickle(path: Path, results: dict[str, Any], include_models: bool) -> None:
     safe_keys = [
         "targets",
@@ -518,6 +540,7 @@ def export_feature_folds(
     n_jobs: int,
     inner_feat_selection: bool,
     use_precomputed_cross_nmi: bool,
+    best_presets: dict[int, dict[str, Any]] | None = None,
 ) -> Path:
     from modnet.matbench.benchmark import matbench_kfold_splits
     from modnet.preprocessing import MODData
@@ -537,6 +560,15 @@ def export_feature_folds(
             fold_dir / "metadata.json",
         )
         if all(path.exists() and path.stat().st_size > 0 for path in complete_paths):
+            # Older exports predate fold-level preset metadata. Upgrade them in
+            # place so the KAN stage can reuse the already completed official
+            # MODNet hyperparameter search instead of tuning another MLP.
+            if best_presets and fold in best_presets:
+                metadata_path = fold_dir / "metadata.json"
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+                if metadata.get("official_best_preset") != best_presets[fold]:
+                    metadata["official_best_preset"] = best_presets[fold]
+                    atomic_write_json(metadata_path, metadata)
             print(f"Feature fold {fold} already complete; reusing it.", flush=True)
             continue
         write_task_status(task_dir, task, "feature_selection", fold=fold)
@@ -581,16 +613,16 @@ def export_feature_folds(
         atomic_dataframe_csv(test_data.df_targets, fold_dir / "test_targets.csv.gz")
         atomic_write_json(fold_dir / "feature_order.json", selected)
         # Metadata is written last and therefore acts as the fold completion marker.
-        atomic_write_json(
-            fold_dir / "metadata.json",
-            {
-                "task": task,
-                "fold": fold,
-                "classification": classification,
-                "n_features_exported": len(selected),
-                "source": "official MODNet v0.1.12 feature_selection",
-            },
-        )
+        fold_metadata = {
+            "task": task,
+            "fold": fold,
+            "classification": classification,
+            "n_features_exported": len(selected),
+            "source": "official MODNet v0.1.12 feature_selection",
+        }
+        if best_presets and fold in best_presets:
+            fold_metadata["official_best_preset"] = best_presets[fold]
+        atomic_write_json(fold_dir / "metadata.json", fold_metadata)
     return export_dir
 
 
@@ -609,6 +641,16 @@ def run_task(args: argparse.Namespace, task: str, output_dir: Path) -> dict[str,
     )
     metadata["modnet_version_target"] = "0.1.12"
     metadata["official_fit_settings"] = OFFICIAL_FIT_SETTINGS
+    metadata["official_fit_settings_role"] = (
+        "fallback only when hp_optimization=False; fit_preset uses fold presets"
+    )
+    metadata["fit_preset_training_rule"] = {
+        "max_epochs": 1000,
+        "early_stopping_monitor": "loss",
+        "early_stopping_min_delta": 0.001,
+        "early_stopping_patience": 100,
+        "restore_best_weights": False,
+    }
     metadata["official_matbench_settings"] = {
         "target_hierarchy": [[list(data.df_targets.columns)]],
         "target_weights": {name: 1 for name in data.df_targets.columns},
@@ -626,6 +668,7 @@ def run_task(args: argparse.Namespace, task: str, output_dir: Path) -> dict[str,
 
     old_cwd = Path.cwd()
     results: dict[str, Any] | None = None
+    best_presets_for_export: dict[int, dict[str, Any]] = {}
     try:
         os.chdir(task_dir)
         existing_summary_path = task_dir / f"official-modnet-summary-{task}.json"
@@ -640,6 +683,9 @@ def run_task(args: argparse.Namespace, task: str, output_dir: Path) -> dict[str,
         if reuse_existing_benchmark and not args.skip_benchmark:
             summary = json.loads(existing_summary_path.read_text(encoding="utf-8"))
             summary["reused_existing_benchmark"] = True
+            best_presets_for_export = load_best_presets_from_fold_csv(
+                task_dir / f"official-modnet-fold-results-{task}.csv"
+            )
             print("Official benchmark outputs already complete; exporting missing folds only.", flush=True)
         elif not args.skip_benchmark:
             write_task_status(task_dir, task, "official_benchmark", n_jobs=args.n_jobs)
@@ -653,6 +699,11 @@ def run_task(args: argparse.Namespace, task: str, output_dir: Path) -> dict[str,
                 results,
                 classification=bool(metadata["classification"]),
             )
+            best_presets_for_export = {
+                fold: preset
+                for fold, preset in enumerate(results.get("best_presets", []))
+                if isinstance(preset, dict)
+            }
             summary.update(
                 {
                     "fast": args.fast,
@@ -688,6 +739,7 @@ def run_task(args: argparse.Namespace, task: str, output_dir: Path) -> dict[str,
                 n_jobs=args.n_jobs,
                 inner_feat_selection=not args.no_inner_feat_selection,
                 use_precomputed_cross_nmi=not args.no_use_precomputed_cross_nmi,
+                best_presets=best_presets_for_export,
             )
             summary["official_feature_folds"] = str(feature_dir)
 
