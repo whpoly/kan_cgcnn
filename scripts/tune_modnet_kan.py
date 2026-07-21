@@ -12,7 +12,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from statistics import mean, stdev
+from statistics import mean, median, stdev
 from typing import Any
 
 
@@ -72,6 +72,16 @@ def parse_args() -> argparse.Namespace:
         choices=MODEL_FAMILIES,
         default=DEFAULT_MODEL_FAMILIES,
     )
+    parser.add_argument(
+        "--protocol",
+        choices=["matbench-nested", "legacy-global"],
+        default="matbench-nested",
+        help=(
+            "matbench-nested tunes independently inside every outer Matbench fold; "
+            "legacy-global is retained only for reproducing older exploratory runs."
+        ),
+    )
+    parser.add_argument("--inner-folds", type=int, default=5)
     parser.add_argument("--tune-folds", type=int, nargs="+", default=[0, 1])
     parser.add_argument("--final-folds", type=int, nargs="+", default=[0, 1, 2, 3, 4])
     parser.add_argument("--search-space", choices=["compact", "random", "grid"], default="compact")
@@ -135,7 +145,16 @@ def parse_args() -> argparse.Namespace:
         choices=["mae", "rmse", "mse", "bce"],
         default=["mae", "rmse"],
     )
-    parser.add_argument("--prune-kan-fraction-candidates", type=float, nargs="+", default=[0.0])
+    parser.add_argument(
+        "--prune-kan-fraction-candidates",
+        type=float,
+        nargs="+",
+        default=[0.0],
+        help=(
+            "Legacy option. Strict nested runs require exactly 0 because pruning is "
+            "performed only as a fixed post-hoc interpretation experiment."
+        ),
+    )
     parser.add_argument("--prune-mode", choices=["edge", "parameter"], default="edge")
     parser.add_argument("--prune-finetune-epochs", type=int, default=0)
     parser.add_argument("--kan-l1-lambda", type=float, default=0.0)
@@ -158,7 +177,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--val-ratio", type=float, default=0.1)
     parser.add_argument("--early-stopping-patience", type=int, default=60)
-    parser.add_argument("--tune-train-size", type=int, default=512)
+    parser.add_argument(
+        "--tune-train-size",
+        type=int,
+        default=None,
+        help="Optional debug-only subsample. Leave unset for strict Matbench tuning.",
+    )
     parser.add_argument(
         "--tune-test-size",
         type=int,
@@ -185,6 +209,21 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--formula-top-k", type=int, default=40)
     parser.add_argument("--formula-min-abs", type=float, default=0.0)
+    parser.add_argument(
+        "--posthoc-prune-kan-fraction",
+        type=float,
+        default=0.3,
+        help=(
+            "Fixed KAN pruning fraction evaluated after model selection. It is never "
+            "used to select hyperparameters; use 0 to disable the post-hoc run."
+        ),
+    )
+    parser.add_argument("--simple-formula-min-inputs", type=int, default=5)
+    parser.add_argument("--simple-formula-max-inputs", type=int, default=10)
+    parser.add_argument("--simple-formula-max-terms", type=int, default=10)
+    parser.add_argument("--simple-formula-degree", type=int, choices=[1, 2], default=2)
+    parser.add_argument("--simple-formula-coverage", type=float, default=0.95)
+    parser.add_argument("--simple-formula-calibration-ratio", type=float, default=0.1)
     parser.add_argument("--skip-final", action="store_true")
     parser.add_argument(
         "--trial-timeout-minutes",
@@ -262,7 +301,7 @@ def candidate_space(args: argparse.Namespace, family: str) -> dict[str, list[Any
             "lr": [3e-4, 1e-3, 2e-3],
             "weight_decay": [0.0, 1e-6],
             "dropout": [0.0, 0.05],
-            "prune_kan_fraction": [0.3, 0.5],
+            "prune_kan_fraction": [0.0],
         }
     elif family.startswith("direct-"):
         defaults = {
@@ -276,7 +315,7 @@ def candidate_space(args: argparse.Namespace, family: str) -> dict[str, list[Any
             "lr": [3e-4, 1e-3, 2e-3],
             "weight_decay": [0.0, 1e-6],
             "dropout": [0.0],
-            "prune_kan_fraction": [0.3, 0.5],
+            "prune_kan_fraction": [0.0],
         }
     else:
         defaults = {
@@ -290,7 +329,7 @@ def candidate_space(args: argparse.Namespace, family: str) -> dict[str, list[Any
             "lr": [3e-4, 1e-3, 2e-3],
             "weight_decay": [0.0, 1e-6],
             "dropout": [0.0],
-            "prune_kan_fraction": [0.3, 0.5],
+            "prune_kan_fraction": [0.0],
         }
     return {
         "n_features": args.n_feature_candidates or defaults["n_features"],
@@ -455,6 +494,11 @@ def benchmark_command(
     test_size: int | None,
     tuning_mode: bool,
     export_formulas: bool,
+    inner_fold_index: int | None = None,
+    inner_n_splits: int | None = None,
+    val_ratio_override: float | None = None,
+    prune_fraction_override: float | None = None,
+    distill_simple_formula: bool = False,
 ) -> list[str]:
     family = trial["model_family"]
     cmd = [
@@ -491,7 +535,11 @@ def benchmark_command(
         "--loss",
         str(trial["loss"]),
         "--prune-kan-fraction",
-        str(trial.get("prune_kan_fraction", 0.0)),
+        str(
+            trial.get("prune_kan_fraction", 0.0)
+            if prune_fraction_override is None
+            else prune_fraction_override
+        ),
         "--prune-mode",
         args.prune_mode,
         "--prune-finetune-epochs",
@@ -505,7 +553,7 @@ def benchmark_command(
         "--batch-size",
         str(args.batch_size),
         "--val-ratio",
-        str(args.val_ratio),
+        str(args.val_ratio if val_ratio_override is None else val_ratio_override),
         "--early-stopping-patience",
         str(args.early_stopping_patience),
         "--lr",
@@ -534,6 +582,15 @@ def benchmark_command(
         )
     if args.require_cuda:
         cmd.append("--require-cuda")
+    if inner_fold_index is not None:
+        cmd.extend(
+            [
+                "--inner-fold-index",
+                str(inner_fold_index),
+                "--inner-n-splits",
+                str(inner_n_splits or args.inner_folds),
+            ]
+        )
     if train_size is not None:
         cmd.extend(["--train-size", str(train_size)])
     if test_size is not None and (not tuning_mode or args.evaluate_tune_test):
@@ -550,6 +607,24 @@ def benchmark_command(
                 str(args.formula_top_k),
                 "--formula-min-abs",
                 str(args.formula_min_abs),
+            ]
+        )
+    if distill_simple_formula:
+        cmd.extend(
+            [
+                "--distill-simple-formula",
+                "--simple-formula-min-inputs",
+                str(args.simple_formula_min_inputs),
+                "--simple-formula-max-inputs",
+                str(args.simple_formula_max_inputs),
+                "--simple-formula-max-terms",
+                str(args.simple_formula_max_terms),
+                "--simple-formula-degree",
+                str(args.simple_formula_degree),
+                "--simple-formula-coverage",
+                str(args.simple_formula_coverage),
+                "--simple-formula-calibration-ratio",
+                str(args.simple_formula_calibration_ratio),
             ]
         )
     return cmd
@@ -654,6 +729,8 @@ def summarize_trial(
                     "params_pruned_pct": safe_float(result.get("params_pruned_pct", 0.0)),
                     "train_seconds": safe_float(result["train_seconds"]),
                     "forward_ms_per_batch": safe_float(result["forward_ms_per_batch"]),
+                    "best_epoch": int(result.get("best_epoch", 0)),
+                    "inner_fold": result.get("inner_fold", ""),
                     **{
                         f"{prefix}_{metric}": safe_float(result.get(f"{prefix}_{metric}"))
                         for prefix in ("best_val", "test")
@@ -937,6 +1014,541 @@ def ordered_fieldnames(rows: list[dict[str, Any]]) -> list[str]:
     return [key for key in preferred if key in keys] + sorted(keys - set(preferred))
 
 
+def aggregate_nested_final_rows(
+    rows: list[dict[str, Any]],
+    dataset: str,
+    task_type: str,
+) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for row in rows:
+        family = str(row.get("model_family", row.get("model", "")))
+        variant = str(row.get("evaluation_variant", "unpruned-benchmark"))
+        grouped.setdefault((family, variant), []).append(row)
+    summaries = []
+    aggregate_numeric_keys = {
+        "params",
+        "effective_params",
+        "pruned_params",
+        "params_before_prune",
+        "params_after_prune",
+        "params_pruned",
+        "params_pruned_pct",
+        "prune_kan_fraction",
+        "pruned_edges",
+        "total_kan_edges",
+        "train_seconds",
+        "forward_ms_per_batch",
+        "selected_epochs",
+        "n_features",
+    }
+    for (family, variant), family_rows in grouped.items():
+        summary: dict[str, Any] = {
+            "dataset": dataset,
+            "task_type": task_type,
+            "model_family": family,
+            "model": family_rows[0].get("model", family),
+            "evaluation_variant": variant,
+            "folds": len(family_rows),
+            "selected_trial_ids": ";".join(
+                str(row.get("trial_id", "")) for row in family_rows
+            ),
+            "selected_epochs": ";".join(
+                str(row.get("selected_epochs", "")) for row in family_rows
+            ),
+        }
+        numeric_keys = sorted(
+            {
+                key
+                for row in family_rows
+                for key, value in row.items()
+                if (
+                    key in aggregate_numeric_keys
+                    or key.startswith("test_")
+                    or key.startswith("simple_formula_")
+                )
+                and isinstance(value, (int, float))
+                and not isinstance(value, bool)
+            }
+        )
+        for key in numeric_keys:
+            values = [safe_float(row.get(key)) for row in family_rows]
+            finite = [value for value in values if math.isfinite(value)]
+            if not finite:
+                continue
+            summary[f"{key}_mean"] = mean(finite)
+            summary[f"{key}_std"] = stdev(finite) if len(finite) > 1 else 0.0
+        for path_key in (
+            "formula_path",
+            "simple_formula_path",
+            "simple_formula_json_path",
+        ):
+            paths = [str(row[path_key]) for row in family_rows if row.get(path_key)]
+            if paths:
+                summary[f"{path_key}s"] = ";".join(paths)
+        summaries.append(summary)
+    return summaries
+
+
+def _write_failure(path: Path, failure: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(failure, indent=2), encoding="utf-8")
+
+
+def _collect_partial_record_paths(
+    destination: dict[tuple[str, str], list[str]],
+    family: str,
+    record_info: dict[str, Any],
+    default_task: str,
+) -> None:
+    if record_info.get("record_path"):
+        destination.setdefault((family, default_task), []).append(
+            str(record_info["record_path"])
+        )
+        return
+    for task_name, task_record in record_info.items():
+        if isinstance(task_record, dict) and task_record.get("record_path"):
+            destination.setdefault((family, str(task_name)), []).append(
+                str(task_record["record_path"])
+            )
+
+
+def _plain_json_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _plain_json_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain_json_value(item) for item in value]
+    if hasattr(value, "item") and callable(value.item):
+        return value.item()
+    return value
+
+
+def merge_matbench_records(
+    partial_paths: dict[tuple[str, str], list[str]],
+    output_dir: Path,
+    expected_folds: int,
+) -> dict[str, Any]:
+    from matbench.task import MatbenchTask
+
+    merged: dict[str, Any] = {}
+    record_dir = output_dir / "matbench-records"
+    record_dir.mkdir(parents=True, exist_ok=True)
+    for (family, task_name), paths in partial_paths.items():
+        documents = [json.loads(Path(path).read_text(encoding="utf-8")) for path in paths]
+        combined = {
+            key: value for key, value in documents[0].items() if key != "results"
+        }
+        results: dict[str, Any] = {}
+        for document in documents:
+            for fold_key, fold_result in document.get("results", {}).items():
+                if fold_result.get("data"):
+                    results[str(fold_key)] = fold_result
+        if len(results) != expected_folds:
+            continue
+        combined["results"] = results
+        task = MatbenchTask.from_dict(combined)
+        task.validate()
+        output_path = record_dir / f"matbench-record-{task_name}-{family}.json"
+        output_path.write_text(json.dumps(combined, indent=2), encoding="utf-8")
+        merged.setdefault(family, {})[task_name] = {
+            "record_path": str(output_path),
+            "scores": _plain_json_value(task.scores),
+        }
+    return merged
+
+
+def run_nested_protocol(
+    args: argparse.Namespace,
+    task_type: str,
+    output_dir: Path,
+    trials: list[dict[str, Any]],
+) -> None:
+    if args.inner_folds < 2:
+        raise ValueError("--inner-folds must be at least 2")
+    if args.tune_train_size is not None:
+        raise ValueError(
+            "Strict Matbench nested tuning uses the complete outer train+validation "
+            "partition; omit --tune-train-size"
+        )
+    if args.evaluate_tune_test or args.metric.startswith("test_"):
+        raise ValueError("Strict nested tuning cannot evaluate or select on outer test folds")
+    if any(float(value) != 0.0 for value in args.prune_kan_fraction_candidates):
+        raise ValueError(
+            "Pruning is not a strict tuning parameter. Use only "
+            "--prune-kan-fraction-candidates 0 and set --posthoc-prune-kan-fraction."
+        )
+
+    print("Protocol: strict Matbench outer CV with independent inner CV", flush=True)
+    print(f"Outer folds: {args.final_folds}", flush=True)
+    print(f"Inner folds per outer fold: {args.inner_folds}", flush=True)
+    if args.dry_run:
+        print(
+            json.dumps(
+                {
+                    "protocol": "matbench-nested",
+                    "outer_folds": args.final_folds,
+                    "inner_folds": args.inner_folds,
+                    "trials": trials,
+                },
+                indent=2,
+            )
+        )
+        return
+
+    all_inner_rows: list[dict[str, Any]] = []
+    all_inner_summaries: list[dict[str, Any]] = []
+    final_rows: list[dict[str, Any]] = []
+    best_by_outer_fold: dict[str, Any] = {}
+    final_commands: dict[str, Any] = {}
+    failed_runs: list[dict[str, Any]] = []
+    partial_record_paths: dict[tuple[str, str], list[str]] = {}
+
+    for outer_fold in args.final_folds:
+        print(f"\n######## OUTER MATBENCH FOLD {outer_fold} ########", flush=True)
+        outer_summaries: list[dict[str, Any]] = []
+        outer_rows: list[dict[str, Any]] = []
+        for trial in trials:
+            inner_payloads = []
+            trial_failed = False
+            for inner_fold in range(args.inner_folds):
+                trial_dir = (
+                    output_dir
+                    / "nested-tuning"
+                    / f"outer-fold-{outer_fold}"
+                    / trial["model_family"]
+                    / trial["trial_id"]
+                    / f"inner-fold-{inner_fold}"
+                )
+                trial_dir.mkdir(parents=True, exist_ok=True)
+                cmd = benchmark_command(
+                    args,
+                    trial,
+                    folds=[outer_fold],
+                    epochs=args.tune_epochs,
+                    output_dir=trial_dir,
+                    train_size=None,
+                    test_size=None,
+                    tuning_mode=True,
+                    export_formulas=False,
+                    inner_fold_index=inner_fold,
+                    inner_n_splits=args.inner_folds,
+                    prune_fraction_override=0.0,
+                )
+                try:
+                    payload = run_benchmark(
+                        cmd,
+                        trial_dir,
+                        args.dataset,
+                        timeout_minutes=args.trial_timeout_minutes,
+                        resume=args.resume,
+                    )
+                    inner_payloads.append(payload)
+                except (TimeoutError, subprocess.SubprocessError, OSError, ValueError) as exc:
+                    failure = {
+                        "phase": "nested_tuning",
+                        "dataset": args.dataset,
+                        "outer_fold": outer_fold,
+                        "inner_fold": inner_fold,
+                        "trial_id": trial["trial_id"],
+                        "model_family": trial["model_family"],
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                        "command": cmd,
+                    }
+                    failed_runs.append(failure)
+                    _write_failure(trial_dir / "FAILED.json", failure)
+                    trial_failed = True
+                    print(f"Nested trial failed and was isolated: {exc}", flush=True)
+                    if args.fail_fast:
+                        raise
+                    break
+            if trial_failed or len(inner_payloads) != args.inner_folds:
+                continue
+            combined_payload = {
+                "folds": [
+                    fold_payload
+                    for payload in inner_payloads
+                    for fold_payload in payload.get("folds", [])
+                ]
+            }
+            rows, summary = summarize_trial(trial, combined_payload)
+            if len(rows) != args.inner_folds:
+                failure = {
+                    "phase": "nested_tuning",
+                    "dataset": args.dataset,
+                    "outer_fold": outer_fold,
+                    "trial_id": trial["trial_id"],
+                    "error_type": "IncompleteInnerCV",
+                    "error": f"Expected {args.inner_folds} rows, got {len(rows)}",
+                }
+                failed_runs.append(failure)
+                continue
+            for row in rows:
+                row.update(
+                    {
+                        "dataset": args.dataset,
+                        "outer_fold": outer_fold,
+                        "selection_metric": args.metric,
+                    }
+                )
+            summary.update(
+                {
+                    "dataset": args.dataset,
+                    "outer_fold": outer_fold,
+                    "selection_metric": args.metric,
+                    "task_type": task_type,
+                    "inner_folds": args.inner_folds,
+                }
+            )
+            outer_rows.extend(rows)
+            outer_summaries.append(summary)
+
+        if not outer_summaries:
+            raise RuntimeError(f"No complete nested tuning trials for outer fold {outer_fold}")
+        metric_mean = f"{args.metric}_mean"
+        outer_summaries.sort(
+            key=lambda row: (
+                str(row["model_family"]),
+                metric_sort_value(row.get(metric_mean), args.metric),
+            )
+        )
+        write_csv(
+            output_dir / f"nested-tuning-fold-results-{args.dataset}-outer{outer_fold}.csv",
+            outer_rows,
+        )
+        write_csv(
+            output_dir / f"nested-tuning-summary-{args.dataset}-outer{outer_fold}.csv",
+            outer_summaries,
+        )
+        all_inner_rows.extend(outer_rows)
+        all_inner_summaries.extend(outer_summaries)
+
+        selected_by_family = best_trials_by_family(
+            outer_summaries,
+            args.metric,
+            enforce_kan_budget=not args.allow_kan_larger_than_mlp,
+        )
+        best_by_outer_fold[str(outer_fold)] = {}
+        final_commands[str(outer_fold)] = {}
+        for family, selected in selected_by_family.items():
+            matching_epochs = [
+                int(row.get("best_epoch", 0))
+                for row in outer_rows
+                if row.get("trial_id") == selected.get("trial_id")
+                and int(row.get("best_epoch", 0)) > 0
+            ]
+            selected_epochs = (
+                max(1, min(args.final_epochs, int(round(median(matching_epochs)))))
+                if matching_epochs
+                else args.final_epochs
+            )
+            selected_result = dict(selected)
+            selected_result["selected_epochs"] = selected_epochs
+            selected_result["outer_fold"] = outer_fold
+            best_by_outer_fold[str(outer_fold)][family] = selected_result
+            trial_keys = {
+                "trial_id",
+                "model_family",
+                "n_features",
+                "common_dim",
+                "group_dim",
+                "property_dim",
+                "target_dim",
+                "kan_grid_size",
+                "kan_spline_order",
+                "lr",
+                "weight_decay",
+                "dropout",
+                "loss",
+                "prune_kan_fraction",
+                "activation",
+            }
+            selected = {key: selected_result[key] for key in trial_keys if key in selected_result}
+            selected["selected_epochs"] = selected_epochs
+            selected["outer_fold"] = outer_fold
+
+            family_dir = (
+                output_dir
+                / "final-benchmark"
+                / f"outer-fold-{outer_fold}"
+                / family
+            )
+            family_dir.mkdir(parents=True, exist_ok=True)
+            cmd = benchmark_command(
+                args,
+                selected,
+                folds=[outer_fold],
+                epochs=selected_epochs,
+                output_dir=family_dir,
+                train_size=None,
+                test_size=None,
+                tuning_mode=False,
+                export_formulas=False,
+                val_ratio_override=0.0,
+                prune_fraction_override=0.0,
+            )
+            final_commands[str(outer_fold)][family] = {"unpruned_benchmark": cmd}
+            try:
+                payload = run_benchmark(
+                    cmd,
+                    family_dir,
+                    args.dataset,
+                    timeout_minutes=args.trial_timeout_minutes,
+                    resume=args.resume,
+                )
+                rows, _, matbench_record = summarize_final_payload(selected, payload)
+                _collect_partial_record_paths(
+                    partial_record_paths,
+                    family,
+                    matbench_record,
+                    args.dataset,
+                )
+                for row in rows:
+                    row.update(
+                        {
+                            "dataset": args.dataset,
+                            "outer_fold": outer_fold,
+                            "model_family": family,
+                            "trial_id": selected["trial_id"],
+                            "selected_epochs": selected_epochs,
+                            "selection_metric": args.metric,
+                            "evaluation_variant": "unpruned-benchmark",
+                        }
+                    )
+                    add_parameter_aliases(row)
+                final_rows.extend(rows)
+            except (TimeoutError, subprocess.SubprocessError, OSError, ValueError) as exc:
+                failure = {
+                    "phase": "outer_final",
+                    "dataset": args.dataset,
+                    "outer_fold": outer_fold,
+                    "trial_id": selected["trial_id"],
+                    "model_family": family,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                    "command": cmd,
+                }
+                failed_runs.append(failure)
+                _write_failure(family_dir / "FAILED.json", failure)
+                if args.fail_fast:
+                    raise
+
+            if family == "mlp" or args.posthoc_prune_kan_fraction <= 0:
+                continue
+            interpretation_dir = (
+                output_dir
+                / "posthoc-interpretation"
+                / f"outer-fold-{outer_fold}"
+                / family
+            )
+            interpretation_dir.mkdir(parents=True, exist_ok=True)
+            interpretation_cmd = benchmark_command(
+                args,
+                selected,
+                folds=[outer_fold],
+                epochs=selected_epochs,
+                output_dir=interpretation_dir,
+                train_size=None,
+                test_size=None,
+                tuning_mode=False,
+                export_formulas=not args.no_export_final_formulas,
+                val_ratio_override=0.0,
+                prune_fraction_override=args.posthoc_prune_kan_fraction,
+                distill_simple_formula=True,
+            )
+            interpretation_cmd.append("--no-matbench-records")
+            final_commands[str(outer_fold)][family]["posthoc_interpretation"] = (
+                interpretation_cmd
+            )
+            try:
+                payload = run_benchmark(
+                    interpretation_cmd,
+                    interpretation_dir,
+                    args.dataset,
+                    timeout_minutes=args.trial_timeout_minutes,
+                    resume=args.resume,
+                )
+                rows, _, _ = summarize_final_payload(selected, payload)
+                for row in rows:
+                    row.update(
+                        {
+                            "dataset": args.dataset,
+                            "outer_fold": outer_fold,
+                            "model_family": family,
+                            "trial_id": selected["trial_id"],
+                            "selected_epochs": selected_epochs,
+                            "selection_metric": args.metric,
+                            "evaluation_variant": "posthoc-pruned-interpretation",
+                        }
+                    )
+                    add_parameter_aliases(row)
+                final_rows.extend(rows)
+            except (TimeoutError, subprocess.SubprocessError, OSError, ValueError) as exc:
+                failure = {
+                    "phase": "posthoc_interpretation",
+                    "dataset": args.dataset,
+                    "outer_fold": outer_fold,
+                    "trial_id": selected["trial_id"],
+                    "model_family": family,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                    "command": interpretation_cmd,
+                }
+                failed_runs.append(failure)
+                _write_failure(interpretation_dir / "FAILED.json", failure)
+                if args.fail_fast:
+                    raise
+
+    write_csv(output_dir / f"nested-tuning-fold-results-{args.dataset}.csv", all_inner_rows)
+    write_csv(output_dir / f"nested-tuning-summary-{args.dataset}.csv", all_inner_summaries)
+    final_summary = aggregate_nested_final_rows(final_rows, args.dataset, task_type)
+    write_csv(output_dir / f"final-fold-results-{args.dataset}.csv", final_rows)
+    write_csv(output_dir / f"final-summary-{args.dataset}.csv", final_summary)
+    final_matbench_records = (
+        merge_matbench_records(
+            partial_record_paths,
+            output_dir,
+            expected_folds=5,
+        )
+        if sorted(set(args.final_folds)) == [0, 1, 2, 3, 4]
+        else {}
+    )
+    result = {
+        "dataset": args.dataset,
+        "task_type": task_type,
+        "protocol": "matbench-nested",
+        "protocol_description": (
+            "Five predefined Matbench outer folds; independent inner CV and model "
+            "selection inside each outer train+validation partition; outer test used once."
+        ),
+        "outer_folds": args.final_folds,
+        "inner_folds": args.inner_folds,
+        "selection_metric": args.metric,
+        "pruning_role": "fixed post-hoc interpretation only",
+        "posthoc_prune_kan_fraction": args.posthoc_prune_kan_fraction,
+        "simple_formula_input_candidates": list(
+            range(args.simple_formula_min_inputs, args.simple_formula_max_inputs + 1)
+        ),
+        "simple_formula_fidelity_statement": (
+            f"split-conformal {100 * args.simple_formula_coverage:g}% marginal "
+            "coverage of |teacher-formula| within a reported target-unit radius, "
+            "conditional on exchangeability; not an unconditional guarantee"
+        ),
+        "best_by_outer_fold": best_by_outer_fold,
+        "final_commands": final_commands,
+        "final_summary": final_summary,
+        "final_matbench_records": final_matbench_records,
+        "failed_runs": failed_runs,
+    }
+    (output_dir / "best_config.json").write_text(
+        json.dumps(result, indent=2), encoding="utf-8"
+    )
+    if failed_runs:
+        (output_dir / "failed-runs.json").write_text(
+            json.dumps(failed_runs, indent=2), encoding="utf-8"
+        )
+    print(f"\nWrote strict nested results to {output_dir}", flush=True)
+
+
 def main() -> None:
     args = parse_args()
     if args.prune_finetune_epochs < 0:
@@ -945,6 +1557,12 @@ def main() -> None:
         raise ValueError("--kan-l1-lambda must be non-negative")
     if any(not 0.0 <= value < 1.0 for value in args.prune_kan_fraction_candidates):
         raise ValueError("all --prune-kan-fraction-candidates must be in [0, 1)")
+    if not 0.0 <= args.posthoc_prune_kan_fraction < 1.0:
+        raise ValueError("--posthoc-prune-kan-fraction must be in [0, 1)")
+    if not 1 <= args.simple_formula_min_inputs <= args.simple_formula_max_inputs:
+        raise ValueError("simple formula input limits must satisfy 1 <= min <= max")
+    if not 0.0 < args.simple_formula_coverage < 1.0:
+        raise ValueError("--simple-formula-coverage must be in (0, 1)")
     task_type = matbench_task_type(args.dataset)
     if task_type not in TASK_TYPES:
         raise ValueError(f"{args.dataset} task_type is {task_type!r}; expected one of {TASK_TYPES}")
@@ -971,7 +1589,8 @@ def main() -> None:
     trials = make_trials(args)
     print(f"Output dir: {output_dir}", flush=True)
     print(f"Model families: {args.model_families}", flush=True)
-    print(f"Tune folds: {args.tune_folds}", flush=True)
+    print(f"Protocol: {args.protocol}", flush=True)
+    print(f"Tune folds (legacy only): {args.tune_folds}", flush=True)
     print(f"Final folds: {args.final_folds}", flush=True)
     print(f"Trials: {len(trials)}", flush=True)
     print(f"Metric: {args.metric}", flush=True)
@@ -979,6 +1598,10 @@ def main() -> None:
     print(f"Loss candidates: {args.loss_candidates}", flush=True)
     if not args.evaluate_tune_test:
         print("Tuning phase: official Matbench test folds are skipped.", flush=True)
+
+    if args.protocol == "matbench-nested":
+        run_nested_protocol(args, task_type, output_dir, trials)
+        return
 
     if args.dry_run:
         print(json.dumps({"trials": trials}, indent=2), flush=True)

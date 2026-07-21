@@ -232,6 +232,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--val-ratio", type=float, default=0.1)
+    parser.add_argument(
+        "--inner-fold-index",
+        type=int,
+        default=None,
+        help=(
+            "Use this deterministic inner CV fold inside the current Matbench outer "
+            "train+validation partition. Intended for strict nested tuning."
+        ),
+    )
+    parser.add_argument("--inner-n-splits", type=int, default=5)
     parser.add_argument("--early-stopping-patience", type=int, default=30)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=0.0)
@@ -274,6 +284,37 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.0,
         help="Minimum absolute coefficient to include in exported formula files.",
+    )
+    parser.add_argument(
+        "--distill-simple-formula",
+        action="store_true",
+        help=(
+            "Distill a sparse polynomial surrogate from the trained model using at "
+            "most --simple-formula-max-inputs descriptors. This is a post-hoc "
+            "interpretability experiment, not a tuning metric."
+        ),
+    )
+    parser.add_argument("--simple-formula-min-inputs", type=int, default=5)
+    parser.add_argument("--simple-formula-max-inputs", type=int, default=10)
+    parser.add_argument("--simple-formula-max-terms", type=int, default=10)
+    parser.add_argument("--simple-formula-degree", type=int, choices=[1, 2], default=2)
+    parser.add_argument(
+        "--simple-formula-coverage",
+        type=float,
+        default=0.95,
+        help=(
+            "Requested split-conformal marginal coverage for the formula-to-model "
+            "absolute error band."
+        ),
+    )
+    parser.add_argument(
+        "--simple-formula-calibration-ratio",
+        type=float,
+        default=0.1,
+        help=(
+            "Fraction of the outer train+validation partition reserved before model "
+            "training for formula fidelity calibration."
+        ),
     )
     parser.add_argument(
         "--no-matbench-records",
@@ -739,7 +780,36 @@ def split_train_val(
     seed: int,
     targets: np.ndarray | None = None,
     task_type: str = "regression",
+    inner_fold_index: int | None = None,
+    inner_n_splits: int = 5,
 ) -> tuple[np.ndarray, np.ndarray]:
+    if inner_fold_index is not None:
+        if inner_n_splits < 2:
+            raise ValueError("inner_n_splits must be at least 2")
+        if not 0 <= inner_fold_index < inner_n_splits:
+            raise ValueError(
+                f"inner_fold_index must be in [0, {inner_n_splits}), got {inner_fold_index}"
+            )
+        if size < inner_n_splits:
+            raise ValueError(
+                f"Cannot make {inner_n_splits} inner folds from only {size} samples"
+            )
+        if task_type == "classification" and targets is not None:
+            labels = np.asarray(targets).astype(int).reshape(-1)
+            unique, counts = np.unique(labels, return_counts=True)
+            if len(unique) >= 2 and int(counts.min()) >= inner_n_splits:
+                from sklearn.model_selection import StratifiedKFold
+
+                splitter = StratifiedKFold(
+                    n_splits=inner_n_splits,
+                    shuffle=True,
+                    random_state=seed,
+                )
+                return list(splitter.split(np.zeros(size), labels))[inner_fold_index]
+        from sklearn.model_selection import KFold
+
+        splitter = KFold(n_splits=inner_n_splits, shuffle=True, random_state=seed)
+        return list(splitter.split(np.arange(size)))[inner_fold_index]
     if val_ratio == 0.0:
         return np.arange(size), np.array([], dtype=int)
     if not 0.0 < val_ratio < 0.5:
@@ -760,6 +830,32 @@ def split_train_val(
     indices = rng.permutation(size)
     val_size = max(1, int(round(size * val_ratio)))
     return indices[val_size:], indices[:val_size]
+
+
+def reserve_formula_calibration(
+    train_indices: np.ndarray,
+    targets: np.ndarray,
+    args: argparse.Namespace,
+    task_type: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    if not args.distill_simple_formula:
+        return train_indices, np.array([], dtype=int)
+    ratio = float(args.simple_formula_calibration_ratio)
+    if not 0.0 < ratio < 0.5:
+        raise ValueError("--simple-formula-calibration-ratio must be in (0, 0.5)")
+    if args.inner_fold_index is not None or args.val_ratio != 0.0:
+        raise ValueError(
+            "Formula calibration must be reserved from a fixed-epoch final fit; "
+            "use --val-ratio 0 and omit --inner-fold-index"
+        )
+    local_train, local_calibration = split_train_val(
+        len(train_indices),
+        ratio,
+        args.seed + 104729,
+        targets=np.asarray(targets)[train_indices],
+        task_type=task_type,
+    )
+    return train_indices[local_train], train_indices[local_calibration]
 
 
 def make_loader(
@@ -1047,6 +1143,461 @@ def benchmark_forward(
     return 1000.0 * (time.perf_counter() - start) / forward_iters
 
 
+@torch.no_grad()
+def predict_features(
+    model: torch.nn.Module,
+    features: np.ndarray,
+    scaler: TargetScaler,
+    device: torch.device,
+    task_type: str,
+    batch_size: int,
+) -> np.ndarray:
+    if len(features) == 0:
+        return np.empty((0, 1), dtype=np.float32)
+    model.eval()
+    predictions = []
+    for start in range(0, len(features), batch_size):
+        batch = torch.from_numpy(features[start : start + batch_size]).to(device)
+        raw = model(batch)
+        raw = raw.reshape(len(batch), -1)
+        if task_type == "classification":
+            prediction = torch.sigmoid(raw)
+        else:
+            prediction = scaler.inverse_transform_tensor(raw)
+        predictions.append(prediction.cpu().numpy())
+    return np.concatenate(predictions, axis=0)
+
+
+def _polynomial_library(
+    values: np.ndarray,
+    variable_names: list[str],
+    degree: int,
+) -> tuple[np.ndarray, list[str]]:
+    columns: list[np.ndarray] = []
+    names: list[str] = []
+    for idx, name in enumerate(variable_names):
+        columns.append(values[:, idx])
+        names.append(name)
+    if degree >= 2:
+        for left in range(values.shape[1]):
+            for right in range(left, values.shape[1]):
+                columns.append(values[:, left] * values[:, right])
+                if left == right:
+                    names.append(f"{variable_names[left]}^2")
+                else:
+                    names.append(f"{variable_names[left]}*{variable_names[right]}")
+    matrix = np.column_stack(columns) if columns else np.empty((len(values), 0))
+    return matrix.astype(float, copy=False), names
+
+
+def _fit_sparse_polynomial(
+    values: np.ndarray,
+    target: np.ndarray,
+    variable_names: list[str],
+    degree: int,
+    max_terms: int,
+) -> dict[str, Any]:
+    library, term_names = _polynomial_library(values, variable_names, degree)
+    if library.shape[1] == 0:
+        raise ValueError("A simple formula needs at least one input")
+    design = np.column_stack([np.ones(len(library)), library])
+    ridge = 1e-8 * np.eye(design.shape[1])
+    ridge[0, 0] = 0.0
+    try:
+        dense_coef = np.linalg.solve(design.T @ design + ridge, design.T @ target)
+    except np.linalg.LinAlgError:
+        dense_coef = np.linalg.lstsq(design, target, rcond=None)[0]
+    contribution = np.abs(dense_coef[1:]) * np.maximum(library.std(axis=0), 1e-12)
+    term_count = min(max(1, int(max_terms)), library.shape[1], max(1, len(target) - 1))
+    selected = np.argsort(contribution)[-term_count:]
+    selected = selected[np.argsort(selected)]
+    sparse_design = np.column_stack([np.ones(len(library)), library[:, selected]])
+    sparse_coef = np.linalg.lstsq(sparse_design, target, rcond=None)[0]
+    return {
+        "intercept": float(sparse_coef[0]),
+        "coefficients": [float(value) for value in sparse_coef[1:]],
+        "term_indices": [int(value) for value in selected],
+        "term_names": [term_names[int(value)] for value in selected],
+        "degree": int(degree),
+    }
+
+
+def _predict_sparse_polynomial(
+    specification: dict[str, Any],
+    values: np.ndarray,
+    variable_names: list[str],
+) -> np.ndarray:
+    library, _ = _polynomial_library(values, variable_names, int(specification["degree"]))
+    selected = np.asarray(specification["term_indices"], dtype=int)
+    coefficients = np.asarray(specification["coefficients"], dtype=float)
+    return float(specification["intercept"]) + library[:, selected] @ coefficients
+
+
+def _absolute_correlation(values: np.ndarray, target: np.ndarray) -> np.ndarray:
+    centered_target = target - np.mean(target)
+    target_norm = np.sqrt(np.sum(centered_target**2))
+    centered_values = values - np.mean(values, axis=0, keepdims=True)
+    value_norm = np.sqrt(np.sum(centered_values**2, axis=0))
+    denominator = value_norm * target_norm
+    numerator = np.abs(centered_values.T @ centered_target)
+    return np.divide(
+        numerator,
+        denominator,
+        out=np.zeros_like(numerator, dtype=float),
+        where=denominator > 1e-12,
+    )
+
+
+def _select_simple_formula(
+    features: np.ndarray,
+    teacher_target: np.ndarray,
+    feature_names: list[str],
+    min_inputs: int,
+    max_inputs: int,
+    max_terms: int,
+    degree: int,
+    seed: int,
+) -> dict[str, Any]:
+    if len(features) < 8:
+        raise ValueError("At least 8 teacher-training samples are required for formula distillation")
+    rng = np.random.default_rng(seed)
+    permutation = rng.permutation(len(features))
+    selection_size = max(2, int(round(0.2 * len(features))))
+    selection_size = min(selection_size, len(features) - 4)
+    selection_indices = permutation[:selection_size]
+    fit_indices = permutation[selection_size:]
+    correlations = _absolute_correlation(features[fit_indices], teacher_target[fit_indices])
+    pool_size = min(features.shape[1], max(20, 4 * max_inputs))
+    candidate_pool = [int(value) for value in np.argsort(correlations)[-pool_size:][::-1]]
+
+    selected: list[int] = []
+    candidates_by_size: list[dict[str, Any]] = []
+    for _ in range(min(max_inputs, len(candidate_pool))):
+        best_candidate = None
+        best_specification = None
+        best_mae = float("inf")
+        for candidate in candidate_pool:
+            if candidate in selected:
+                continue
+            attempted = selected + [candidate]
+            variable_names = [f"z{idx}" for idx in range(len(attempted))]
+            specification = _fit_sparse_polynomial(
+                features[fit_indices][:, attempted],
+                teacher_target[fit_indices],
+                variable_names,
+                degree,
+                max_terms,
+            )
+            prediction = _predict_sparse_polynomial(
+                specification,
+                features[selection_indices][:, attempted],
+                variable_names,
+            )
+            selection_target = teacher_target[selection_indices]
+            mae = float(np.mean(np.abs(prediction - selection_target)))
+            denominator = float(
+                np.sum((selection_target - np.mean(selection_target)) ** 2)
+            )
+            fidelity_r2 = (
+                1.0 - float(np.sum((selection_target - prediction) ** 2)) / denominator
+                if denominator > 1e-12
+                else float("nan")
+            )
+            if mae < best_mae:
+                best_mae = mae
+                best_candidate = candidate
+                best_specification = specification
+                best_fidelity_r2 = fidelity_r2
+        if best_candidate is None or best_specification is None:
+            break
+        selected.append(best_candidate)
+        candidates_by_size.append(
+            {
+                "feature_indices": list(selected),
+                "selection_teacher_mae": best_mae,
+                "selection_teacher_r2": best_fidelity_r2,
+            }
+        )
+    if not candidates_by_size:
+        raise RuntimeError("No simple formula candidate could be fitted")
+
+    eligible_by_size = [
+        item for item in candidates_by_size if len(item["feature_indices"]) >= min_inputs
+    ]
+    if not eligible_by_size:
+        raise ValueError(
+            f"Could not fit a formula with at least {min_inputs} inputs; "
+            f"only {len(candidates_by_size)} input steps were available"
+        )
+    minimum_mae = min(item["selection_teacher_mae"] for item in eligible_by_size)
+    tolerance = minimum_mae * 1.02 + 1e-12
+    chosen = next(
+        item for item in eligible_by_size if item["selection_teacher_mae"] <= tolerance
+    )
+    selected = list(chosen["feature_indices"])
+    variable_names = [f"z{idx}" for idx in range(len(selected))]
+    specification = _fit_sparse_polynomial(
+        features[:, selected],
+        teacher_target,
+        variable_names,
+        degree,
+        max_terms,
+    )
+    specification.update(
+        {
+            "feature_indices": selected,
+            "feature_names": [str(feature_names[idx]) for idx in selected],
+            "variable_names": variable_names,
+            "selection_teacher_mae": float(chosen["selection_teacher_mae"]),
+            "input_fidelity_curve": [
+                {
+                    "n_inputs": len(item["feature_indices"]),
+                    "selection_teacher_mae": float(item["selection_teacher_mae"]),
+                    "selection_teacher_r2_pct": 100.0
+                    * float(item["selection_teacher_r2"]),
+                }
+                for item in eligible_by_size
+            ],
+        }
+    )
+    return specification
+
+
+def _conformal_radius(residuals: np.ndarray, coverage: float) -> float:
+    residuals = np.sort(np.asarray(residuals, dtype=float).reshape(-1))
+    if not 0.0 < coverage < 1.0:
+        raise ValueError("--simple-formula-coverage must be in (0, 1)")
+    if len(residuals) == 0:
+        raise ValueError("Formula fidelity calibration set is empty")
+    rank = int(np.ceil((len(residuals) + 1) * coverage))
+    if rank > len(residuals):
+        return float("inf")
+    return float(residuals[rank - 1])
+
+
+def _formula_expression(specification: dict[str, Any]) -> str:
+    terms = [f"{float(specification['intercept']):.12g}"]
+    for coefficient, name in zip(
+        specification["coefficients"], specification["term_names"]
+    ):
+        terms.append(f"{float(coefficient):+.12g}*{name}")
+    return " ".join(terms)
+
+
+def _formula_variable_definitions(
+    prepared: dict[str, Any],
+    selected_indices: list[int],
+    variable_names: list[str],
+) -> list[dict[str, Any]]:
+    feature_names = list(prepared["selected_features"])
+    pipeline = prepared.get("feature_pipeline")
+    definitions = []
+    for variable, feature_index in zip(variable_names, selected_indices):
+        feature = str(feature_names[feature_index])
+        definition: dict[str, Any] = {
+            "variable": variable,
+            "feature": feature,
+            "expression": f"preprocessed({feature!r})",
+        }
+        if pipeline is not None:
+            imputer = pipeline.named_steps.get("imputer")
+            statistic = (
+                float(imputer.statistics_[feature_index])
+                if imputer is not None and hasattr(imputer, "statistics_")
+                else float("nan")
+            )
+            definition["impute_value"] = statistic
+            imputed = f"impute({feature!r}, {statistic:.12g})"
+            scaler = pipeline.named_steps.get("scaler")
+            if isinstance(scaler, MinMaxScaler):
+                scale = float(scaler.scale_[feature_index])
+                offset = float(scaler.min_[feature_index])
+                definition.update({"scale": scale, "offset": offset})
+                definition["expression"] = f"{scale:.12g}*{imputed}{offset:+.12g}"
+            elif isinstance(scaler, StandardScaler):
+                center = float(scaler.mean_[feature_index])
+                scale = float(scaler.scale_[feature_index])
+                definition.update({"center": center, "scale": scale})
+                definition["expression"] = (
+                    f"({imputed}-{center:.12g})/{scale:.12g}"
+                )
+            else:
+                definition["expression"] = imputed
+        definitions.append(definition)
+    return definitions
+
+
+def distill_simple_formulas(
+    model: torch.nn.Module,
+    prepared: dict[str, Any],
+    args: argparse.Namespace,
+    device: torch.device,
+    task_type: str,
+    target_names: list[str],
+    model_label: str,
+    fold: int,
+) -> dict[str, Any]:
+    if task_type != "regression":
+        raise ValueError("Simple polynomial formula distillation currently supports regression only")
+    min_inputs = int(args.simple_formula_min_inputs)
+    max_inputs = int(args.simple_formula_max_inputs)
+    max_terms = int(args.simple_formula_max_terms)
+    if min_inputs < 1 or max_inputs < min_inputs or max_terms < 1:
+        raise ValueError("Simple formula input and term limits must be positive")
+    if len(prepared["x_calibration"]) == 0:
+        raise ValueError("No reserved formula calibration set is available")
+
+    teacher_train = predict_features(
+        model,
+        prepared["x_train"],
+        prepared["target_scaler"],
+        device,
+        task_type,
+        args.batch_size,
+    )
+    teacher_calibration = predict_features(
+        model,
+        prepared["x_calibration"],
+        prepared["target_scaler"],
+        device,
+        task_type,
+        args.batch_size,
+    )
+    teacher_test = predict_features(
+        model,
+        prepared["x_test"],
+        prepared["target_scaler"],
+        device,
+        task_type,
+        args.batch_size,
+    )
+    target_test = np.asarray(prepared["y_test"], dtype=float).reshape(len(teacher_test), -1)
+    records = []
+    text_lines = [
+        f"Simple post-hoc surrogate for {model_label}",
+        f"dataset = {args.dataset}",
+        f"outer_fold = {fold}",
+        "scope = formula distillation and calibration use only the outer train+validation partition",
+        "outer_test_role = final evaluation only",
+        f"requested_conformal_coverage = {100.0 * args.simple_formula_coverage:.6g}%",
+        "coverage_statement = P(|teacher(x)-formula(x)| <= radius) >= requested coverage under exchangeability",
+        "note = this is an assumption-conditioned split-conformal statement, not an unconditional guarantee",
+        "note = the coverage percentage is meaningful only together with its target-unit radius",
+        "",
+    ]
+    for target_idx, target_name in enumerate(target_names):
+        specification = _select_simple_formula(
+            prepared["x_train"],
+            teacher_train[:, target_idx],
+            list(prepared["selected_features"]),
+            min_inputs=min_inputs,
+            max_inputs=max_inputs,
+            max_terms=max_terms,
+            degree=int(args.simple_formula_degree),
+            seed=args.seed + fold * 1009 + target_idx,
+        )
+        selected = specification["feature_indices"]
+        variable_names = specification["variable_names"]
+        formula_calibration = _predict_sparse_polynomial(
+            specification,
+            prepared["x_calibration"][:, selected],
+            variable_names,
+        )
+        calibration_residual = np.abs(
+            teacher_calibration[:, target_idx] - formula_calibration
+        )
+        radius = _conformal_radius(calibration_residual, args.simple_formula_coverage)
+        formula_test = _predict_sparse_polynomial(
+            specification,
+            prepared["x_test"][:, selected],
+            variable_names,
+        )
+        teacher_residual = np.abs(teacher_test[:, target_idx] - formula_test)
+        teacher_mae = float(np.mean(teacher_residual))
+        target_mae = float(np.mean(np.abs(target_test[:, target_idx] - formula_test)))
+        empirical_coverage = float(np.mean(teacher_residual <= radius))
+        denominator = float(np.sum((teacher_test[:, target_idx] - np.mean(teacher_test[:, target_idx])) ** 2))
+        fidelity_r2 = (
+            1.0 - float(np.sum((teacher_test[:, target_idx] - formula_test) ** 2)) / denominator
+            if denominator > 1e-12
+            else float("nan")
+        )
+        record = {
+            **specification,
+            "target": target_name,
+            "expression": _formula_expression(specification),
+            "conformal_coverage": float(args.simple_formula_coverage),
+            "conformal_radius": radius,
+            "calibration_size": int(len(calibration_residual)),
+            "test_teacher_mae": teacher_mae,
+            "test_target_mae": target_mae,
+            "test_fidelity_r2": fidelity_r2,
+            "test_empirical_coverage": empirical_coverage,
+        }
+        record["variable_definitions"] = _formula_variable_definitions(
+            prepared,
+            selected,
+            variable_names,
+        )
+        records.append(record)
+        text_lines.extend(
+            [
+                f"target = {target_name}",
+                *[
+                    f"  {definition['variable']} = {definition['expression']}"
+                    for definition in record["variable_definitions"]
+                ],
+                f"  formula = {record['expression']}",
+                f"  inputs = {len(selected)}",
+                f"  nonconstant_terms = {len(specification['coefficients'])}",
+                "  validation_fidelity_curve = "
+                + ", ".join(
+                    f"{item['n_inputs']} inputs: MAE {item['selection_teacher_mae']:.12g}, "
+                    f"R2 {item['selection_teacher_r2_pct']:.6g}%"
+                    for item in specification["input_fidelity_curve"]
+                ),
+                f"  formula_to_teacher_test_MAE = {teacher_mae:.12g}",
+                f"  formula_to_target_test_MAE = {target_mae:.12g}",
+                f"  formula_to_teacher_test_R2 = {fidelity_r2:.12g}",
+                f"  conformal_radius = {radius:.12g}",
+                f"  empirical_outer_test_coverage = {100.0 * empirical_coverage:.6g}%",
+                "",
+            ]
+        )
+
+    output_base = Path(args.output_dir) / (
+        f"simple-formula-{args.dataset}-fold{fold}-{model_label}"
+    )
+    text_path = output_base.with_suffix(".txt")
+    json_path = output_base.with_suffix(".json")
+    text_path.write_text("\n".join(text_lines), encoding="utf-8")
+    json_path.write_text(json.dumps({"targets": records}, indent=2), encoding="utf-8")
+    return {
+        "simple_formula_path": str(text_path),
+        "simple_formula_json_path": str(json_path),
+        "simple_formula_n_inputs": max(len(record["feature_indices"]) for record in records),
+        "simple_formula_n_terms": max(len(record["coefficients"]) for record in records),
+        "simple_formula_inputs": ";".join(
+            ",".join(record["feature_names"]) for record in records
+        ),
+        "simple_formula_requested_coverage_pct": 100.0 * float(args.simple_formula_coverage),
+        "simple_formula_conformal_radius": float(
+            np.mean([record["conformal_radius"] for record in records])
+        ),
+        "simple_formula_test_empirical_coverage_pct": 100.0
+        * float(np.mean([record["test_empirical_coverage"] for record in records])),
+        "simple_formula_test_teacher_mae": float(
+            np.mean([record["test_teacher_mae"] for record in records])
+        ),
+        "simple_formula_test_target_mae": float(
+            np.mean([record["test_target_mae"] for record in records])
+        ),
+        "simple_formula_test_fidelity_r2_pct": 100.0
+        * float(np.mean([record["test_fidelity_r2"] for record in records])),
+        "simple_formula_calibration_size": min(record["calibration_size"] for record in records),
+    }
+
+
 def run_model(
     model_name: str,
     fold_data: dict[str, Any],
@@ -1271,6 +1822,8 @@ def run_model(
     effective_params = count_nonzero_parameters(model)
     row = {
         "fold": fold_data["metadata"]["fold"],
+        "inner_fold": args.inner_fold_index if args.inner_fold_index is not None else "",
+        "inner_n_splits": args.inner_n_splits if args.inner_fold_index is not None else "",
         "task_type": task_type,
         "target": target_name,
         "target_names": ";".join(target_names),
@@ -1337,6 +1890,19 @@ def run_model(
             fold_metadata=fold_data["metadata"],
         )
         row["formula_path"] = str(formula_path)
+    if args.distill_simple_formula:
+        row.update(
+            distill_simple_formulas(
+                model,
+                prepared,
+                args,
+                device,
+                task_type,
+                target_names,
+                model_label,
+                int(fold_data["metadata"]["fold"]),
+            )
+        )
     if len(test_prediction) == 0:
         predictions = []
     else:
@@ -1382,9 +1948,17 @@ def prepare_fold(
         args.seed,
         targets=fold_data["train_targets"],
         task_type=fold_data["metadata"]["task_type"],
+        inner_fold_index=args.inner_fold_index,
+        inner_n_splits=args.inner_n_splits,
     )
     train_targets = as_2d_targets(fold_data["train_targets"])
     test_targets = as_2d_targets(fold_data["test_targets"])
+    train_indices, calibration_indices = reserve_formula_calibration(
+        train_indices,
+        train_targets,
+        args,
+        str(fold_data["metadata"]["task_type"]),
+    )
     processor = MODNetFeatureProcessor(
         n_features=args.n_features,
         scaler=args.scaler,
@@ -1417,6 +1991,7 @@ def prepare_fold(
         "feature_preset": actual_train_preset,
         "featurize_seconds": featurize_seconds,
         "processor": processor,
+        "feature_pipeline": None,
         "selected_features": processor.selected_columns_,
         "target_scaler": target_scaler,
         "train_size": len(train_indices),
@@ -1426,8 +2001,11 @@ def prepare_fold(
         "y_train_scaled": y_all_train_scaled[train_indices],
         "x_val": x_all_train[val_indices] if len(val_indices) else np.empty((0, x_all_train.shape[1]), dtype=np.float32),
         "y_val_scaled": y_all_train_scaled[val_indices] if len(val_indices) else np.empty((0, train_targets.shape[1]), dtype=np.float32),
+        "x_calibration": x_all_train[calibration_indices] if len(calibration_indices) else np.empty((0, x_all_train.shape[1]), dtype=np.float32),
+        "y_calibration": train_targets[calibration_indices] if len(calibration_indices) else np.empty((0, train_targets.shape[1]), dtype=np.float32),
         "x_test": x_test,
         "y_test_scaled": y_test_scaled,
+        "y_test": test_targets,
     }
 
 
@@ -1460,9 +2038,17 @@ def prepare_precomputed_fold(
         args.seed,
         targets=fold_data["train_targets"],
         task_type=fold_data["metadata"]["task_type"],
+        inner_fold_index=args.inner_fold_index,
+        inner_n_splits=args.inner_n_splits,
     )
     train_targets = as_2d_targets(fold_data["train_targets"])
     test_targets = as_2d_targets(fold_data["test_targets"])
+    train_indices, calibration_indices = reserve_formula_calibration(
+        train_indices,
+        train_targets,
+        args,
+        str(fold_data["metadata"]["task_type"]),
+    )
 
     pipeline = make_feature_pipeline(args)
     pipeline.fit(train_features.iloc[train_indices][selected_features])
@@ -1479,6 +2065,7 @@ def prepare_precomputed_fold(
         "feature_preset": "official-modnet-precomputed",
         "featurize_seconds": 0.0,
         "processor": None,
+        "feature_pipeline": pipeline,
         "selected_features": selected_features,
         "target_scaler": target_scaler,
         "train_size": len(train_indices),
@@ -1488,8 +2075,11 @@ def prepare_precomputed_fold(
         "y_train_scaled": y_all_train_scaled[train_indices],
         "x_val": x_all_train[val_indices] if len(val_indices) else np.empty((0, x_all_train.shape[1]), dtype=np.float32),
         "y_val_scaled": y_all_train_scaled[val_indices] if len(val_indices) else np.empty((0, train_targets.shape[1]), dtype=np.float32),
+        "x_calibration": x_all_train[calibration_indices] if len(calibration_indices) else np.empty((0, x_all_train.shape[1]), dtype=np.float32),
+        "y_calibration": train_targets[calibration_indices] if len(calibration_indices) else np.empty((0, train_targets.shape[1]), dtype=np.float32),
         "x_test": x_test,
         "y_test_scaled": y_test_scaled,
+        "y_test": test_targets,
     }
 
 
@@ -1512,6 +2102,13 @@ def summarize_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         formula_paths = [str(row["formula_path"]) for row in model_rows if row.get("formula_path")]
         if formula_paths:
             item["formula_paths"] = ";".join(formula_paths)
+        simple_formula_paths = [
+            str(row["simple_formula_path"])
+            for row in model_rows
+            if row.get("simple_formula_path")
+        ]
+        if simple_formula_paths:
+            item["simple_formula_paths"] = ";".join(simple_formula_paths)
         item["params_before_prune_mean"] = item["params_mean"]
         item["params_after_prune_mean"] = item["effective_params_mean"]
         item["params_after_prune_std"] = item["effective_params_std"]
@@ -1535,6 +2132,19 @@ def summarize_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         for key in dynamic_metric_keys:
             item[f"{key}_mean"] = finite_mean([float(row.get(key, float("nan"))) for row in model_rows])
             item[f"{key}_std"] = finite_std([float(row.get(key, float("nan"))) for row in model_rows])
+        simple_numeric_keys = sorted(
+            key
+            for row in model_rows
+            for key, value in row.items()
+            if key.startswith("simple_formula_") and isinstance(value, (int, float))
+        )
+        for key in simple_numeric_keys:
+            item[f"{key}_mean"] = finite_mean(
+                [float(row.get(key, float("nan"))) for row in model_rows]
+            )
+            item[f"{key}_std"] = finite_std(
+                [float(row.get(key, float("nan"))) for row in model_rows]
+            )
         summary.append(item)
     return summary
 
@@ -2285,11 +2895,21 @@ def write_elastic_matbench_records(
 def _serialize_matbench_scores(task) -> Any:
     try:
         scores = task.scores
-        if hasattr(scores, "as_dict"):
-            return scores.as_dict()
-        return json.loads(json.dumps(scores))
+        # Matbench 0.1.x returns RecursiveDotDict here.  Its __getattr__ creates
+        # missing dictionary entries, so hasattr(scores, "as_dict") is always
+        # true even though as_dict is not a callable method.  Recursively copy
+        # the mapping instead of probing attributes.
+        return _json_value(scores)
     except Exception as exc:
         return {"error": f"{exc.__class__.__name__}: {exc}"}
+
+
+def _json_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _json_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_value(item) for item in value]
+    return _json_scalar(value)
 
 
 def _json_scalar(value: Any) -> Any:
@@ -2343,6 +2963,8 @@ def _format(value: Any) -> str:
 def ordered_fieldnames(rows: list[dict[str, Any]]) -> list[str]:
     preferred = [
         "fold",
+        "inner_fold",
+        "inner_n_splits",
         "task_type",
         "target",
         "target_names",
@@ -2364,6 +2986,18 @@ def ordered_fieldnames(rows: list[dict[str, Any]]) -> list[str]:
         "params_pruned",
         "params_pruned_pct",
         "formula_path",
+        "simple_formula_path",
+        "simple_formula_json_path",
+        "simple_formula_n_inputs",
+        "simple_formula_n_terms",
+        "simple_formula_inputs",
+        "simple_formula_requested_coverage_pct",
+        "simple_formula_conformal_radius",
+        "simple_formula_test_empirical_coverage_pct",
+        "simple_formula_test_teacher_mae",
+        "simple_formula_test_target_mae",
+        "simple_formula_test_fidelity_r2_pct",
+        "simple_formula_calibration_size",
         "params",
         "effective_params",
         "pruned_params",
@@ -2408,6 +3042,10 @@ def main() -> None:
         raise ValueError("--prune-finetune-epochs must be non-negative")
     if args.kan_l1_lambda < 0:
         raise ValueError("--kan-l1-lambda must be non-negative")
+    if args.inner_fold_index is not None and args.val_ratio == 0:
+        raise ValueError("--inner-fold-index requires --val-ratio > 0")
+    if args.distill_simple_formula and args.skip_test_eval:
+        raise ValueError("Simple formula distillation requires outer test evaluation")
     set_seed(args.seed)
     device = resolve_device(args)
     if device.type == "cuda":

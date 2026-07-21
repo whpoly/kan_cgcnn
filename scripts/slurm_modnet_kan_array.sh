@@ -8,7 +8,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --gres=gpu:1
-#SBATCH --time=24:00:00
+#SBATCH --time=72:00:00
 
 set -euo pipefail
 
@@ -70,35 +70,41 @@ echo "model_families=${MODEL_FAMILIES_ARRAY[*]}"
 
 conda run --no-capture-output -n "$KAN_ENV" \
   python -u scripts/tune_modnet_kan.py \
-  --dataset "$TASK" \
-  --precomputed-feature-dir "$FEATURE_DIR" \
-  --model-families "${MODEL_FAMILIES_ARRAY[@]}" \
-  --tune-folds 0 1 \
-  --final-folds 0 1 2 3 4 \
-  --search-space random \
-  --num-random-trials 8 \
-  --max-trials-per-family 8 \
-  --metric auto \
-  --tune-epochs 80 \
-  --final-epochs 300 \
-  --tune-train-size 1024 \
-  --batch-size 64 \
-  --val-ratio 0.1 \
-  --early-stopping-patience 60 \
-  --loss-candidates mae rmse \
-  --activation elu \
-  --kan-l1-lambda 1e-5 \
-  --prune-kan-fraction-candidates 0 0.3 0.5 \
-  --prune-mode edge \
-  --prune-finetune-epochs 20 \
-  --scaler minmax \
-  --target-scale none \
-  --impute-strategy median \
-  --device cuda \
-  --require-cuda \
-  --log-every-epochs 10 \
-  --trial-timeout-minutes "$TRIAL_TIMEOUT_MINUTES" \
-  --formula-top-k 20 \
-  --formula-min-abs 0 \
-  --resume \
-  --output-dir "$TASK_OUTPUT_DIR"
+    --dataset "$TASK" \
+    --precomputed-feature-dir "$FEATURE_DIR" \
+    --model-families "${MODEL_FAMILIES_ARRAY[@]}" \
+    --protocol matbench-nested \
+    --inner-folds 5 \
+    --final-folds 0 1 2 3 4 \
+    --search-space random \
+    --num-random-trials 8 \
+    --max-trials-per-family 8 \
+    --metric auto \
+    --tune-epochs 80 \
+    --final-epochs 300 \
+    --batch-size 64 \
+    --val-ratio 0.1 \
+    --early-stopping-patience 60 \
+    --loss-candidates mae rmse \
+    --activation elu \
+    --kan-l1-lambda 0 \
+    --prune-kan-fraction-candidates 0 \
+    --posthoc-prune-kan-fraction 0.3 \
+    --prune-mode edge \
+    --prune-finetune-epochs 20 \
+    --scaler minmax \
+    --target-scale none \
+    --impute-strategy median \
+    --device cuda \
+    --require-cuda \
+    --log-every-epochs 10 \
+    --trial-timeout-minutes "$TRIAL_TIMEOUT_MINUTES" \
+    --formula-top-k 20 \
+    --formula-min-abs 0 \
+    --simple-formula-min-inputs 5 \
+    --simple-formula-max-inputs 10 \
+    --simple-formula-max-terms 10 \
+    --simple-formula-coverage 0.95 \
+    --simple-formula-calibration-ratio 0.1 \
+    --resume \
+    --output-dir "$TASK_OUTPUT_DIR"

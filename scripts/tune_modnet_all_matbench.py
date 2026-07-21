@@ -67,6 +67,12 @@ def parse_args() -> argparse.Namespace:
         choices=MODEL_FAMILIES,
         default=DEFAULT_MODEL_FAMILIES,
     )
+    parser.add_argument(
+        "--protocol",
+        choices=["matbench-nested", "legacy-global"],
+        default="matbench-nested",
+    )
+    parser.add_argument("--inner-folds", type=int, default=5)
     parser.add_argument("--tune-folds", type=int, nargs="+", default=[0, 1])
     parser.add_argument("--final-folds", type=int, nargs="+", default=[0, 1, 2, 3, 4])
     parser.add_argument("--search-space", choices=["compact", "random", "grid"], default="compact")
@@ -109,6 +115,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prune-kan-fraction-candidates", type=float, nargs="+", default=[0.0])
     parser.add_argument("--prune-mode", choices=["edge", "parameter"], default="edge")
     parser.add_argument("--prune-finetune-epochs", type=int, default=0)
+    parser.add_argument("--posthoc-prune-kan-fraction", type=float, default=0.3)
     parser.add_argument("--kan-l1-lambda", type=float, default=0.0)
     parser.add_argument("--activation", choices=["relu", "elu", "silu"], default="elu")
     parser.add_argument("--trial-timeout-minutes", type=float, default=180.0)
@@ -121,7 +128,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--val-ratio", type=float, default=0.1)
     parser.add_argument("--early-stopping-patience", type=int, default=60)
-    parser.add_argument("--tune-train-size", type=int, default=512)
+    parser.add_argument("--tune-train-size", type=int, default=None)
     parser.add_argument(
         "--tune-test-size",
         type=int,
@@ -137,6 +144,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-export-final-formulas", action="store_true")
     parser.add_argument("--formula-top-k", type=int, default=40)
     parser.add_argument("--formula-min-abs", type=float, default=0.0)
+    parser.add_argument("--simple-formula-min-inputs", type=int, default=5)
+    parser.add_argument("--simple-formula-max-inputs", type=int, default=10)
+    parser.add_argument("--simple-formula-max-terms", type=int, default=10)
+    parser.add_argument("--simple-formula-coverage", type=float, default=0.95)
+    parser.add_argument("--simple-formula-calibration-ratio", type=float, default=0.1)
     parser.add_argument("--skip-final", action="store_true")
     parser.add_argument("--resume", action="store_true", help="Skip datasets that already have a summary CSV.")
     parser.add_argument("--dry-run", action="store_true")
@@ -241,6 +253,10 @@ def build_tune_command(args: argparse.Namespace, dataset: str, output_dir: Path)
         args.search_space,
         "--num-random-trials",
         str(args.num_random_trials),
+        "--protocol",
+        args.protocol,
+        "--inner-folds",
+        str(args.inner_folds),
         "--metric",
         args.metric,
         "--featurizer-preset",
@@ -263,8 +279,6 @@ def build_tune_command(args: argparse.Namespace, dataset: str, output_dir: Path)
         str(args.val_ratio),
         "--early-stopping-patience",
         str(args.early_stopping_patience),
-        "--tune-train-size",
-        str(args.tune_train_size),
         "--seed",
         str(args.seed),
         "--device",
@@ -275,13 +289,27 @@ def build_tune_command(args: argparse.Namespace, dataset: str, output_dir: Path)
         args.prune_mode,
         "--prune-finetune-epochs",
         str(args.prune_finetune_epochs),
+        "--posthoc-prune-kan-fraction",
+        str(args.posthoc_prune_kan_fraction),
         "--kan-l1-lambda",
         str(args.kan_l1_lambda),
         "--activation",
         args.activation,
         "--trial-timeout-minutes",
         str(args.trial_timeout_minutes),
+        "--simple-formula-min-inputs",
+        str(args.simple_formula_min_inputs),
+        "--simple-formula-max-inputs",
+        str(args.simple_formula_max_inputs),
+        "--simple-formula-max-terms",
+        str(args.simple_formula_max_terms),
+        "--simple-formula-coverage",
+        str(args.simple_formula_coverage),
+        "--simple-formula-calibration-ratio",
+        str(args.simple_formula_calibration_ratio),
     ]
+    if args.tune_train_size is not None:
+        cmd.extend(["--tune-train-size", str(args.tune_train_size)])
     extend_values(cmd, "--model-families", args.model_families)
     extend_values(cmd, "--tune-folds", args.tune_folds)
     extend_values(cmd, "--final-folds", args.final_folds)
@@ -331,8 +359,11 @@ def extend_optional_values(cmd: list[str], flag: str, values: list[Any] | None) 
 def summary_csv_path(dataset_dir: Path, dataset: str, skip_final: bool) -> Path:
     final_path = dataset_dir / f"final-summary-{dataset}.csv"
     tuning_path = dataset_dir / f"tuning-summary-{dataset}.csv"
+    nested_tuning_path = dataset_dir / f"nested-tuning-summary-{dataset}.csv"
     if final_path.exists() and not skip_final:
         return final_path
+    if nested_tuning_path.exists():
+        return nested_tuning_path
     return tuning_path
 
 
@@ -433,6 +464,13 @@ def print_dataset_summary(
     summary_path: Path,
     final_summary: bool,
 ) -> list[dict[str, Any]]:
+    benchmark_rows = [
+        row
+        for row in rows
+        if row.get("evaluation_variant", "unpruned-benchmark") == "unpruned-benchmark"
+    ]
+    if benchmark_rows:
+        rows = benchmark_rows
     metric = metric_from_rows(rows, meta, final_summary)
     ranked = rank_rows(rows, metric)
     unit = meta.get("unit")

@@ -9,10 +9,11 @@ a KAN. The recommended comparison is `mlp`, `hybrid-fastkan`, and
 descriptors directly to KAN for a more transparent ablation; `fastkan` and
 `spline` retain the older all-KAN ablation.
 
-KAN pruning is restricted to KAN edges: the shared MLP trunk is not pruned and
-the strongest incoming edge of every KAN output node is protected. Optional
-post-pruning fine-tuning keeps masks enforced. Hyperparameter selection uses an
-internal validation split, not the official Matbench test fold.
+The default tuner uses strict nested Matbench evaluation. Every outer fold has
+its own five-fold inner hyperparameter search; the outer test fold is evaluated
+only after that fold's model configuration and epoch count are fixed. KAN
+pruning is not a tuning variable. It is run afterward as a fixed interpretation
+ablation and never changes the main unpruned benchmark score.
 
 Create the PyTorch/KAN environment:
 
@@ -100,17 +101,25 @@ The default reliable tuning protocol is:
   v0.1.12 benchmark convention: `matbench_log_gvrh` and `matbench_log_kvrh`
   are trained together as the two-output `matbench_elastic` model, then
   reported per target, covering all 13 original Matbench tasks;
-- tuning uses folds `0 1` with an internal validation split and never selects
-  hyperparameters on the Matbench test fold;
-- final benchmark reruns the selected configuration on folds `0 1 2 3 4`;
+- each outer fold `0..4` independently uses five inner folds for model and
+  hyperparameter selection; no configuration is shared across overlapping
+  outer folds;
+- the selected inner-CV epoch count is used to refit on that outer fold's full
+  train+validation partition before its test fold is evaluated;
 - MLP tries wider hidden blocks such as `256/512` common dims;
 - KAN tries smaller blocks such as `32/64/128` common dims, matching the KAN
   paper's motivation that narrower KANs can compete with wider MLPs;
 - the search includes `target_dim=0`, so shallower formulas without the final
   hidden target block are tested;
-- KAN grid sizes `3` and `5`, learning rates, MAE/RMSE losses, and pruning
-  fractions `0.3/0.5` are tuned;
-- final KAN formula export uses `--formula-top-k 20`.
+- KAN grid sizes `3` and `5`, learning rates, MAE/RMSE losses, and architecture
+  sizes are tuned; pruning is fixed at `0.3` only in the post-hoc run;
+- post-hoc formula distillation evaluates `5..10` descriptor inputs, selects
+  the smallest formula within 2% of the best inner validation fidelity, and
+  reports its outer-test target MAE;
+- a reserved calibration subset provides an assumption-conditioned
+  split-conformal statement of the form `P(|KAN-formula| <= q) >= 95%`, where
+  the target-unit radius `q` and empirical outer-test coverage are reported;
+  this is not an unconditional guarantee outside exchangeable data.
 
 `--formula-top-k` only controls how many nonzero terms are shown per neuron in
 the text formula; it does not change training, pruning, or benchmark metrics.
@@ -363,13 +372,13 @@ Parameter tuning plus Matbench-aligned final benchmark:
 python scripts/tune_modnet_kan.py `
   --dataset matbench_phonons `
   --model-families mlp hybrid-fastkan hybrid-spline direct-fastkan `
-  --tune-folds 0 1 `
+  --protocol matbench-nested `
+  --inner-folds 5 `
   --final-folds 0 1 2 3 4 `
   --search-space random `
   --num-random-trials 8 `
   --tune-epochs 80 `
   --final-epochs 300 `
-  --tune-train-size 512 `
   --featurizer-preset auto `
   --n-feature-candidates 128 256 280 512 `
   --common-dim-candidates 64 128 512 `
@@ -381,10 +390,16 @@ python scripts/tune_modnet_kan.py `
   --weight-decay-candidates 0 1e-6 1e-5 `
   --dropout-candidates 0 0.05 `
   --loss-candidates mae rmse `
-  --prune-kan-fraction-candidates 0 0.3 0.5 `
+  --prune-kan-fraction-candidates 0 `
+  --posthoc-prune-kan-fraction 0.3 `
   --prune-mode edge `
   --prune-finetune-epochs 20 `
-  --kan-l1-lambda 1e-5 `
+  --kan-l1-lambda 0 `
+  --simple-formula-min-inputs 5 `
+  --simple-formula-max-inputs 10 `
+  --simple-formula-max-terms 10 `
+  --simple-formula-coverage 0.95 `
+  --simple-formula-calibration-ratio 0.1 `
   --target-scale none `
   --batch-size 64 `
   --val-ratio 0.1 `
@@ -398,21 +413,22 @@ selects validation MAE for regression tasks and validation ROC-AUC for
 classification tasks; you can still force a specific `best_val_*` metric. For
 regression, `--loss-candidates mae rmse` tunes whether the training objective is
 MAE or RMSE-style MSE. Classification tasks use binary cross entropy and record
-probabilities for Matbench scoring. For each family the tuner selects the best
-trial on `--tune-folds`, then reruns that configuration on `--final-folds`. The
-tuning phase skips the official Matbench test fold by default; use
-`--evaluate-tune-test` only for diagnostics, not for model selection. Final
-outputs include
+probabilities for Matbench scoring. For every outer fold and model family, the
+tuner selects a configuration using only that fold's five inner validation
+partitions. It then refits for the median selected inner-CV epoch count on the
+full outer train+validation partition. The outer test fold is evaluated once.
+Final outputs include
 `final-summary-<dataset>.csv`, `final-fold-results-<dataset>.csv`, per-family
 MatbenchTask records, and `best_config.json`.
 
 By default, KAN final selection enforces the parameter budget: FastKAN and
 B-spline KAN candidates are selected only when their `effective_params_mean` is
 below the selected MLP's effective parameter count. If no KAN trial satisfies
-that budget, that KAN family is skipped in the final benchmark. Add
-`--prune-kan-fraction-candidates 0 0.3 0.5` to test post-training global
-magnitude pruning; the summaries record both raw `params_mean` and nonzero
-`effective_params_mean`. Use `--allow-kan-larger-than-mlp` only for ablations
+that budget, that KAN family is skipped in the final benchmark. Pruning must
+remain `--prune-kan-fraction-candidates 0` during nested tuning. A fixed
+`--posthoc-prune-kan-fraction` is reported as the separate
+`posthoc-pruned-interpretation` variant and cannot become the benchmark winner.
+Use `--allow-kan-larger-than-mlp` only for ablations
 where parameter fairness is intentionally disabled.
 
 The parameter columns are also written with explicit pruning names:
@@ -422,20 +438,24 @@ sparse layerwise formula summaries by default under the family final benchmark
 directory, for example `formula-matbench_phonons-fold0-fastkan.txt`. Use
 `--formula-top-k` to control how many nonzero terms are shown per layer/output,
 `--formula-top-k 0` to write all nonzero terms, `--formula-min-abs` to hide tiny
-coefficients, or `--no-export-final-formulas` to disable the files.
+coefficients, or `--no-export-final-formulas` to disable the layerwise files.
+The more compact `simple-formula-*.txt/.json` artifacts compare 5 through 10
+descriptor inputs, show the validation fidelity curve, and report formula MAE,
+teacher-fidelity MAE/R2, conformal radius, requested coverage, and empirical
+outer-test coverage.
 
 Matbench-strict all-dataset run:
 
 ```powershell
 python scripts/tune_modnet_all_matbench.py `
   --model-families mlp hybrid-fastkan hybrid-spline `
-  --tune-folds 0 1 `
+  --protocol matbench-nested `
+  --inner-folds 5 `
   --final-folds 0 1 2 3 4 `
   --search-space random `
   --num-random-trials 8 `
   --tune-epochs 80 `
   --final-epochs 300 `
-  --tune-train-size 512 `
   --featurizer-preset auto `
   --n-feature-candidates 128 256 280 512 `
   --common-dim-candidates 64 128 512 `
@@ -447,7 +467,10 @@ python scripts/tune_modnet_all_matbench.py `
   --weight-decay-candidates 0 1e-6 1e-5 `
   --dropout-candidates 0 0.05 `
   --loss-candidates mae rmse `
-  --prune-kan-fraction-candidates 0 0.3 `
+  --prune-kan-fraction-candidates 0 `
+  --posthoc-prune-kan-fraction 0.3 `
+  --simple-formula-min-inputs 5 `
+  --simple-formula-max-inputs 10 `
   --target-scale none `
   --batch-size 64 `
   --val-ratio 0.1 `
