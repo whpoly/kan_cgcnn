@@ -90,6 +90,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tune-folds", type=int, nargs="+", default=[0, 1])
     parser.add_argument("--final-folds", type=int, nargs="+", default=[0, 1, 2, 3, 4])
     parser.add_argument("--search-space", choices=["compact", "random", "grid"], default="compact")
+    parser.add_argument(
+        "--strategy", choices=["successive-halving", "full"], default="successive-halving"
+    )
+    parser.add_argument("--halving-factor", type=int, default=3)
+    parser.add_argument("--rung-epochs", type=int, nargs="+", default=[200, 500, 1000])
+    parser.add_argument("--rung-fold-counts", type=int, nargs="+", default=[1, 3, 5])
     parser.add_argument("--num-random-trials", type=int, default=8)
     parser.add_argument("--max-trials-per-family", type=int, default=None)
     parser.add_argument(
@@ -129,10 +135,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prune-kan-fraction-candidates", type=float, nargs="+", default=[0.0])
     parser.add_argument("--prune-mode", choices=["edge", "parameter"], default="edge")
     parser.add_argument("--prune-finetune-epochs", type=int, default=0)
-    parser.add_argument("--posthoc-prune-kan-fraction", type=float, default=0.3)
-    parser.add_argument("--kan-l1-lambda", type=float, default=0.0)
+    parser.add_argument("--posthoc-prune-kan-fraction", type=float, default=0.0)
+    parser.add_argument("--kan-l1-lambda", type=float, default=1e-6)
+    parser.add_argument(
+        "--kan-l1-lambda-candidates",
+        type=float,
+        nargs=2,
+        default=[0.0, 1e-6],
+    )
     parser.add_argument("--kan-sparsity-mode", choices=["edge-group", "parameter-l1"], default="edge-group")
-    parser.add_argument("--posthoc-kan-sparsity-lambda", type=float, default=1e-4)
+    parser.add_argument("--posthoc-kan-sparsity-lambda", type=float, default=0.0)
     parser.add_argument("--activation", choices=["relu", "elu", "silu"], default="elu")
     parser.add_argument("--trial-timeout-minutes", type=float, default=720.0)
     parser.add_argument("--allow-kan-larger-than-mlp", action="store_true")
@@ -281,6 +293,14 @@ def build_tune_command(args: argparse.Namespace, dataset: str, output_dir: Path)
         str(output_dir),
         "--search-space",
         args.search_space,
+        "--strategy",
+        args.strategy,
+        "--halving-factor",
+        str(args.halving_factor),
+        "--rung-epochs",
+        *[str(value) for value in args.rung_epochs],
+        "--rung-fold-counts",
+        *[str(value) for value in args.rung_fold_counts],
         "--num-random-trials",
         str(args.num_random_trials),
         "--protocol",
@@ -323,6 +343,8 @@ def build_tune_command(args: argparse.Namespace, dataset: str, output_dir: Path)
         str(args.posthoc_prune_kan_fraction),
         "--kan-l1-lambda",
         str(args.kan_l1_lambda),
+        "--kan-l1-lambda-candidates",
+        *[str(value) for value in args.kan_l1_lambda_candidates],
         "--kan-sparsity-mode",
         args.kan_sparsity_mode,
         "--posthoc-kan-sparsity-lambda",

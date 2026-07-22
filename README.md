@@ -387,9 +387,12 @@ python scripts/tune_modnet_kan.py `
   --protocol matbench-nested `
   --inner-folds 5 `
   --final-folds 0 1 2 3 4 `
-  --search-space random `
-  --num-random-trials 12 `
-  --max-trials-per-family 12 `
+  --search-space compact `
+  --strategy successive-halving `
+  --halving-factor 3 `
+  --rung-epochs 200 500 1000 `
+  --rung-fold-counts 1 3 5 `
+  --max-trials-per-family 20 `
   --tune-epochs 1000 `
   --final-epochs 1000 `
   --n-feature-candidates 16 32 64 128 `
@@ -400,12 +403,13 @@ python scripts/tune_modnet_kan.py `
   --dropout-candidates 0 `
   --loss-candidates mae `
   --prune-kan-fraction-candidates 0 `
-  --posthoc-prune-kan-fraction 0.3 `
+  --posthoc-prune-kan-fraction 0 `
   --prune-mode edge `
   --prune-finetune-epochs 20 `
-  --kan-l1-lambda 0 `
+  --kan-l1-lambda 1e-6 `
+  --kan-l1-lambda-candidates 0 1e-6 `
   --kan-sparsity-mode edge-group `
-  --posthoc-kan-sparsity-lambda 1e-4 `
+  --posthoc-kan-sparsity-lambda 0 `
   --simple-formula-min-inputs 5 `
   --simple-formula-max-inputs 10 `
   --simple-formula-max-terms 10 `
@@ -446,17 +450,32 @@ Final outputs include
 `final-summary-<dataset>.csv`, `final-fold-results-<dataset>.csv`, per-family
 MatbenchTask records, and `best_config.json`.
 
+The constrained full grid would contain 8,136 valid FastKAN configurations and
+16,272 valid spline-KAN configurations. The default compact search reduces this
+to 20 representative configurations per family: ten skipped/active block
+templates crossed with two sparsity penalties. Successive halving evaluates
+them in rungs of 20 -> 7 -> 3 trials using `(1 fold, 200 epochs)`, `(3 folds, 500
+epochs)`, and `(5 folds, 1000 epochs)`, respectively. Elimination is performed
+separately within each KAN family and never uses the outer test partition.
+
 By default, KAN final selection enforces the parameter budget: FastKAN and
 B-spline KAN candidates are selected only when their `effective_params_mean` is
 below the selected MLP's effective parameter count. If no KAN trial satisfies
 that budget, that KAN family is skipped in the final benchmark. Pruning must
-remain `--prune-kan-fraction-candidates 0` during nested tuning. A fixed
-`--posthoc-prune-kan-fraction` is reported as the separate
-`sparsity-trained-pruned-interpretation` variant and cannot become the benchmark
-winner. The accuracy model is trained with `--kan-l1-lambda 0`; a second model
-is retrained from scratch using the fixed `--posthoc-kan-sparsity-lambda`
-edge-group penalty, then structurally pruned, mask-fine-tuned, and distilled
-over 5--10 inputs.
+remain `--prune-kan-fraction-candidates 0` during nested tuning. FastKAN and
+spline-KAN select their in-training edge-group sparsity penalty from
+`--kan-l1-lambda-candidates 0 1e-6` by inner validation, with no structural
+pruning. Including zero protects benchmark accuracy when neither nonzero penalty
+helps. The selected outer-final benchmark KAN is distilled directly in the same
+process, so the symbolic surrogate explains the exact model whose benchmark
+metrics are reported. Its symbolic surrogate remains sparse through the input
+and term limits. Formula fitting and conformal calibration use disjoint subsets
+of outer train+validation, but both query the already fitted benchmark teacher.
+Nonzero
+`--posthoc-kan-sparsity-lambda` and `--posthoc-prune-kan-fraction` values opt into
+a deliberately different `sparsity-trained-pruned-interpretation` teacher,
+which is then structurally pruned, mask-fine-tuned, and distilled over 5--10
+inputs.
 The final summary additionally reports `parameter_reduction_vs_mlp_pct`,
 `test_performance_delta_vs_mlp`, and `meets_smaller_and_better_goal`; positive
 performance delta always means better (lower MAE for regression, higher ROC-AUC
@@ -504,9 +523,10 @@ python scripts/tune_modnet_all_matbench.py `
   --dropout-candidates 0 `
   --loss-candidates mae `
   --prune-kan-fraction-candidates 0 `
-  --posthoc-prune-kan-fraction 0.3 `
+  --kan-l1-lambda-candidates 0 1e-6 `
+  --posthoc-prune-kan-fraction 0 `
   --kan-sparsity-mode edge-group `
-  --posthoc-kan-sparsity-lambda 1e-4 `
+  --posthoc-kan-sparsity-lambda 0 `
   --simple-formula-min-inputs 5 `
   --simple-formula-max-inputs 10 `
   --target-scale none `

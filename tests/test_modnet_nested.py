@@ -25,6 +25,7 @@ from tune_modnet_kan import (  # noqa: E402
     best_trials_by_family,
     load_official_mlp_trial,
     make_trials,
+    nested_rung_schedule,
     parse_args,
     resume_payload_matches_command,
     valid_compact_kan_trial,
@@ -169,6 +170,80 @@ def test_posthoc_command_automatically_requests_symbolic_regression(
     function_start = command.index("--simple-formula-functions") + 1
     assert "sin" in command[function_start:]
     assert "log" in command[function_start:]
+
+
+def test_benchmark_sparsity_defaults_are_conservative_and_unpruned(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["tune_modnet_kan.py", "--model-families", "fastkan"],
+    )
+    args = parse_args()
+
+    assert args.posthoc_prune_kan_fraction == 0.0
+    assert args.posthoc_kan_sparsity_lambda == 0.0
+    assert args.kan_l1_lambda == 1e-6
+    assert args.kan_l1_lambda_candidates == [0.0, 1e-6]
+
+    trials = make_trials(args)
+    assert {trial["kan_l1_lambda"] for trial in trials} == {0.0, 1e-6}
+    trial = next(trial for trial in trials if trial["kan_l1_lambda"] == 1e-6)
+    command = benchmark_command(
+        args,
+        trial,
+        folds=[0],
+        epochs=1000,
+        output_dir=tmp_path,
+        train_size=None,
+        test_size=None,
+        tuning_mode=False,
+        export_formulas=False,
+        prune_fraction_override=0.0,
+        distill_simple_formula=True,
+    )
+    assert float(command[command.index("--kan-l1-lambda") + 1]) == 1e-6
+    assert float(command[command.index("--prune-kan-fraction") + 1]) == 0.0
+    assert "--distill-simple-formula" in command
+
+
+def test_compact_search_and_successive_halving_bound_the_search(monkeypatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "tune_modnet_kan.py",
+            "--model-families",
+            "fastkan",
+            "spline",
+            "--search-space",
+            "compact",
+        ],
+    )
+    args = parse_args()
+    trials = make_trials(args)
+
+    assert sum(trial["model_family"] == "fastkan" for trial in trials) == 20
+    assert sum(trial["model_family"] == "spline" for trial in trials) == 20
+    assert len(
+        {
+            (
+                trial["n_features"],
+                trial["common_dim"],
+                trial["group_dim"],
+                trial["property_dim"],
+                trial["target_dim"],
+            )
+            for trial in trials
+            if trial["model_family"] == "fastkan"
+        }
+    ) == 10
+    assert nested_rung_schedule(args) == [
+        {"name": "rung-1", "epochs": 200, "fold_count": 1},
+        {"name": "rung-2", "epochs": 500, "fold_count": 3},
+        {"name": "rung-3", "epochs": 1000, "fold_count": 5},
+    ]
 
 
 def test_resume_does_not_mix_sparse_and_dense_models() -> None:

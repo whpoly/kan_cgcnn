@@ -1809,9 +1809,10 @@ def distill_simple_formulas(
     if len(prepared["x_calibration"]) == 0:
         raise ValueError("No reserved formula calibration set is available")
 
+    formula_train_features = prepared.get("x_formula_train", prepared["x_train"])
     teacher_train = predict_features(
         model,
-        prepared["x_train"],
+        formula_train_features,
         prepared["target_scaler"],
         device,
         task_type,
@@ -1839,7 +1840,10 @@ def distill_simple_formulas(
         f"Simple post-hoc surrogate for {model_label}",
         f"dataset = {args.dataset}",
         f"outer_fold = {fold}",
+        "teacher_role = exact outer benchmark model instance",
+        "teacher_training_scope = full outer train+validation partition",
         "scope = formula distillation and calibration use only the outer train+validation partition",
+        "formula_split = formula fitting and calibration are disjoint; the fitted teacher may have seen calibration inputs during benchmark training",
         "outer_test_role = final evaluation only",
         f"requested_conformal_coverage = {100.0 * args.simple_formula_coverage:.6g}%",
         f"formula_method = {args.simple_formula_method}",
@@ -1849,12 +1853,13 @@ def distill_simple_formulas(
         else f"polynomial_degree = {args.simple_formula_degree}",
         "coverage_statement = P(|teacher(x)-formula(x)| <= radius) >= requested coverage under exchangeability",
         "note = this is an assumption-conditioned split-conformal statement, not an unconditional guarantee",
+        "note = exchangeability must remain credible despite reuse of formula-calibration inputs in teacher training",
         "note = the coverage percentage is meaningful only together with its target-unit radius",
         "",
     ]
     for target_idx, target_name in enumerate(target_names):
         specification = _select_simple_formula(
-            prepared["x_train"],
+            formula_train_features,
             teacher_train[:, target_idx],
             list(prepared["selected_features"]),
             min_inputs=min_inputs,
@@ -1885,6 +1890,9 @@ def distill_simple_formulas(
         )
         teacher_residual = np.abs(teacher_test[:, target_idx] - formula_test)
         teacher_mae = float(np.mean(teacher_residual))
+        teacher_target_mae = float(
+            np.mean(np.abs(target_test[:, target_idx] - teacher_test[:, target_idx]))
+        )
         target_mae = float(np.mean(np.abs(target_test[:, target_idx] - formula_test)))
         empirical_coverage = float(np.mean(teacher_residual <= radius))
         denominator = float(np.sum((teacher_test[:, target_idx] - np.mean(teacher_test[:, target_idx])) ** 2))
@@ -1902,6 +1910,7 @@ def distill_simple_formulas(
             "conformal_radius": radius,
             "calibration_size": int(len(calibration_residual)),
             "test_teacher_mae": teacher_mae,
+            "test_teacher_target_mae": teacher_target_mae,
             "test_target_mae": target_mae,
             "test_fidelity_r2": fidelity_r2,
             "test_empirical_coverage": empirical_coverage,
@@ -1933,6 +1942,7 @@ def distill_simple_formulas(
                     f"R2 {item['selection_teacher_r2_pct']:.6g}%"
                     for item in specification["input_fidelity_curve"]
                 ),
+                f"  teacher_to_target_test_MAE = {teacher_target_mae:.12g}",
                 f"  formula_to_teacher_test_MAE = {teacher_mae:.12g}",
                 f"  formula_to_target_test_MAE = {target_mae:.12g}",
                 f"  formula_to_teacher_test_R2 = {fidelity_r2:.12g}",
@@ -2398,7 +2408,7 @@ def prepare_fold(
             raise RuntimeError("train and test featurization used different presets")
     featurize_seconds = time.perf_counter() - start
 
-    train_indices, val_indices = split_train_val(
+    teacher_train_indices, val_indices = split_train_val(
         len(train_features),
         args.val_ratio,
         args.seed,
@@ -2409,8 +2419,8 @@ def prepare_fold(
     )
     train_targets = as_2d_targets(fold_data["train_targets"])
     test_targets = as_2d_targets(fold_data["test_targets"])
-    train_indices, calibration_indices = reserve_formula_calibration(
-        train_indices,
+    formula_train_indices, calibration_indices = reserve_formula_calibration(
+        teacher_train_indices,
         train_targets,
         args,
         str(fold_data["metadata"]["task_type"]),
@@ -2423,8 +2433,8 @@ def prepare_fold(
         task_type=fold_data["metadata"]["task_type"],
     )
     processor.fit(
-        train_features.iloc[train_indices],
-        feature_selection_target(train_targets[train_indices]),
+        train_features.iloc[teacher_train_indices],
+        feature_selection_target(train_targets[teacher_train_indices]),
     )
 
     x_all_train = processor.transform(train_features)
@@ -2433,7 +2443,7 @@ def prepare_fold(
         if test_features is not None
         else np.empty((0, x_all_train.shape[1]), dtype=np.float32)
     )
-    y_train = train_targets[train_indices]
+    y_train = train_targets[teacher_train_indices]
     y_val = train_targets[val_indices] if len(val_indices) else np.empty((0, train_targets.shape[1]), dtype=np.float32)
     target_scaler = TargetScaler(y_train, mode=args.target_scale)
     y_all_train_scaled = target_scaler.transform(train_targets)
@@ -2450,11 +2460,12 @@ def prepare_fold(
         "feature_pipeline": None,
         "selected_features": processor.selected_columns_,
         "target_scaler": target_scaler,
-        "train_size": len(train_indices),
+        "train_size": len(teacher_train_indices),
         "val_size": len(val_indices),
         "test_size": len(test_targets),
-        "x_train": x_all_train[train_indices],
-        "y_train_scaled": y_all_train_scaled[train_indices],
+        "x_train": x_all_train[teacher_train_indices],
+        "y_train_scaled": y_all_train_scaled[teacher_train_indices],
+        "x_formula_train": x_all_train[formula_train_indices],
         "x_val": x_all_train[val_indices] if len(val_indices) else np.empty((0, x_all_train.shape[1]), dtype=np.float32),
         "y_val_scaled": y_all_train_scaled[val_indices] if len(val_indices) else np.empty((0, train_targets.shape[1]), dtype=np.float32),
         "x_calibration": x_all_train[calibration_indices] if len(calibration_indices) else np.empty((0, x_all_train.shape[1]), dtype=np.float32),
@@ -2488,7 +2499,7 @@ def prepare_precomputed_fold(
     if not selected_features:
         raise ValueError("precomputed feature fold contains no usable feature columns")
 
-    train_indices, val_indices = split_train_val(
+    teacher_train_indices, val_indices = split_train_val(
         len(train_features),
         args.val_ratio,
         args.seed,
@@ -2499,19 +2510,19 @@ def prepare_precomputed_fold(
     )
     train_targets = as_2d_targets(fold_data["train_targets"])
     test_targets = as_2d_targets(fold_data["test_targets"])
-    train_indices, calibration_indices = reserve_formula_calibration(
-        train_indices,
+    formula_train_indices, calibration_indices = reserve_formula_calibration(
+        teacher_train_indices,
         train_targets,
         args,
         str(fold_data["metadata"]["task_type"]),
     )
 
     pipeline = make_feature_pipeline(args)
-    pipeline.fit(train_features.iloc[train_indices][selected_features])
+    pipeline.fit(train_features.iloc[teacher_train_indices][selected_features])
     x_all_train = pipeline.transform(train_features[selected_features]).astype(np.float32, copy=False)
     x_test = pipeline.transform(test_features.reindex(columns=selected_features)).astype(np.float32, copy=False)
 
-    y_train = train_targets[train_indices]
+    y_train = train_targets[teacher_train_indices]
     y_val = train_targets[val_indices] if len(val_indices) else np.empty((0, train_targets.shape[1]), dtype=np.float32)
     target_scaler = TargetScaler(y_train, mode=args.target_scale)
     y_all_train_scaled = target_scaler.transform(train_targets)
@@ -2524,11 +2535,12 @@ def prepare_precomputed_fold(
         "feature_pipeline": pipeline,
         "selected_features": selected_features,
         "target_scaler": target_scaler,
-        "train_size": len(train_indices),
+        "train_size": len(teacher_train_indices),
         "val_size": len(val_indices),
         "test_size": len(test_targets),
-        "x_train": x_all_train[train_indices],
-        "y_train_scaled": y_all_train_scaled[train_indices],
+        "x_train": x_all_train[teacher_train_indices],
+        "y_train_scaled": y_all_train_scaled[teacher_train_indices],
+        "x_formula_train": x_all_train[formula_train_indices],
         "x_val": x_all_train[val_indices] if len(val_indices) else np.empty((0, x_all_train.shape[1]), dtype=np.float32),
         "y_val_scaled": y_all_train_scaled[val_indices] if len(val_indices) else np.empty((0, train_targets.shape[1]), dtype=np.float32),
         "x_calibration": x_all_train[calibration_indices] if len(calibration_indices) else np.empty((0, x_all_train.shape[1]), dtype=np.float32),

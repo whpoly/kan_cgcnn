@@ -119,11 +119,12 @@ for task in "${TASKS[@]}"; do
     --early-stopping-patience 60 \
     --loss-candidates mae rmse \
     --activation elu \
-    --kan-l1-lambda 0 \
+    --kan-l1-lambda 1e-6 \
+    --kan-l1-lambda-candidates 0 1e-6 \
     --kan-sparsity-mode edge-group \
     --prune-kan-fraction-candidates 0 \
-    --posthoc-prune-kan-fraction 0.3 \
-    --posthoc-kan-sparsity-lambda 1e-4 \
+    --posthoc-prune-kan-fraction 0 \
+    --posthoc-kan-sparsity-lambda 0 \
     --prune-mode edge \
     --prune-finetune-epochs 20 \
     --scaler minmax \
