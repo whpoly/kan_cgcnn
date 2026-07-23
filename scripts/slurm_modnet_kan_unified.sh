@@ -30,10 +30,11 @@ FIXED_KAN_COMMON_DIM="${FIXED_KAN_COMMON_DIM:-20}"
 FIXED_KAN_GROUP_DIM="${FIXED_KAN_GROUP_DIM:-10}"
 FIXED_KAN_PROPERTY_DIM="${FIXED_KAN_PROPERTY_DIM:-5}"
 FIXED_KAN_GRID_SIZE="${FIXED_KAN_GRID_SIZE:-3}"
-FIXED_EPOCHS="${FIXED_EPOCHS:-300}"
+FIXED_EPOCHS="${FIXED_EPOCHS:-1000}"
 FIXED_BATCH_SIZE="${FIXED_BATCH_SIZE:-64}"
 FIXED_LR="${FIXED_LR:-0.001}"
-FIXED_EARLY_STOPPING_PATIENCE="${FIXED_EARLY_STOPPING_PATIENCE:-30}"
+FIXED_EARLY_STOPPING_PATIENCE="${FIXED_EARLY_STOPPING_PATIENCE:-100}"
+FIXED_EARLY_STOPPING_MIN_DELTA="${FIXED_EARLY_STOPPING_MIN_DELTA:-0.001}"
 FIXED_SEED="${FIXED_SEED:-7}"
 FIXED_MIN_RELATIVE_IMPROVEMENT="${FIXED_MIN_RELATIVE_IMPROVEMENT:-0.02}"
 FIXED_MIN_FOLD_WINS="${FIXED_MIN_FOLD_WINS:-3}"
@@ -101,6 +102,7 @@ if [[ "$RUN_MODE" == "fixed5fold" ]]; then
   echo "Official results: ${OFFICIAL_OUTPUT_DIR}"
   echo "KAN outputs: ${KAN_OUTPUT_ROOT}"
   echo "Fixed FastKAN: n_features=${FIXED_N_FEATURES}, dims=${FIXED_KAN_COMMON_DIM}-${FIXED_KAN_GROUP_DIM}-${FIXED_KAN_PROPERTY_DIM}, grid=${FIXED_KAN_GRID_SIZE}, lr=${FIXED_LR}, epochs=${FIXED_EPOCHS}"
+  echo "Official fit rule: full outer train+validation, loss early stopping, min_delta=${FIXED_EARLY_STOPPING_MIN_DELTA}, patience=${FIXED_EARLY_STOPPING_PATIENCE}, restore_best_state=false"
 
   for task in "${TASKS[@]}"; do
     feature_dir="${OFFICIAL_OUTPUT_DIR}/${task}/official_feature_folds"
@@ -133,10 +135,11 @@ if [[ "$RUN_MODE" == "fixed5fold" ]]; then
       --kan-grid-size "$FIXED_KAN_GRID_SIZE" \
       --epochs "$FIXED_EPOCHS" \
       --batch-size "$FIXED_BATCH_SIZE" \
-      --val-ratio 0.1 \
-      --early-stopping-monitor validation \
+      --val-ratio 0 \
+      --early-stopping-monitor loss \
       --early-stopping-patience "$FIXED_EARLY_STOPPING_PATIENCE" \
-      --restore-best-state \
+      --early-stopping-min-delta "$FIXED_EARLY_STOPPING_MIN_DELTA" \
+      --no-restore-best-state \
       --lr "$FIXED_LR" \
       --weight-decay 0 \
       --loss auto \
