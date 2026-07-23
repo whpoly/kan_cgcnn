@@ -402,7 +402,7 @@ class SymbolicKAN(nn.Module):
         self,
         in_features: int,
         target_names: Sequence[str],
-        hidden_dims: Sequence[int] = (8, 4),
+        hidden_dims: Sequence[int] = (4,),
         edges_per_unit: int = 3,
         primitives: Sequence[str] = SYMBOLIC_PRIMITIVES,
         *,
@@ -494,9 +494,38 @@ def export_symbolic_kan(
     feature_names: Sequence[str],
     target_means: Sequence[float] | None = None,
     target_stds: Sequence[float] | None = None,
+    feature_scales: Sequence[float] | None = None,
+    feature_offsets: Sequence[float] | None = None,
+    feature_impute_values: Sequence[float] | None = None,
 ) -> tuple[dict[str, Any], str]:
     if len(feature_names) != model.in_features:
         raise ValueError("Feature-name count does not match Symbolic-KAN input")
+    export_raw_inputs = feature_scales is not None or feature_offsets is not None
+    if (feature_scales is None) != (feature_offsets is None):
+        raise ValueError("Feature scales and offsets must be provided together")
+    scales = (
+        [float(value) for value in feature_scales]
+        if feature_scales is not None
+        else [1.0] * model.in_features
+    )
+    offsets = (
+        [float(value) for value in feature_offsets]
+        if feature_offsets is not None
+        else [0.0] * model.in_features
+    )
+    impute_values = (
+        [float(value) for value in feature_impute_values]
+        if feature_impute_values is not None
+        else [float("nan")] * model.in_features
+    )
+    if (
+        len(scales) != model.in_features
+        or len(offsets) != model.in_features
+        or len(impute_values) != model.in_features
+    ):
+        raise ValueError(
+            "Feature preprocessing parameter count does not match Symbolic-KAN input"
+        )
     payload: dict[str, Any] = {
         "method": "symbolic_kan_discrete_gated",
         "paper": "arXiv:2603.23854",
@@ -511,6 +540,10 @@ def export_symbolic_kan(
         ],
         "edges_per_unit": model.edges_per_unit,
         "primitive_library": list(model.primitives),
+        "input_space": (
+            "raw_descriptors" if export_raw_inputs else "preprocessed_descriptors"
+        ),
+        "input_preprocessing_folded": export_raw_inputs,
         "targets": [],
     }
     report = [
@@ -539,17 +572,52 @@ def export_symbolic_kan(
                     unit_records.append({"variable": variable, **selected, "expression": "0"})
                     definitions.append({"variable": variable, "expression": "0"})
                     continue
+                exported = dict(selected)
+                projection_indices = [
+                    int(index) for index in selected["projection_indices"]
+                ]
+                model_projection_weights = [
+                    float(value) for value in selected["projection_weight"]
+                ]
+                projection_weights = list(model_projection_weights)
+                projection_bias = float(selected["projection_bias"])
+                if layer_index == 0 and export_raw_inputs:
+                    projection_weights = [
+                        weight * scales[source_index]
+                        for source_index, weight in zip(
+                            projection_indices,
+                            model_projection_weights,
+                        )
+                    ]
+                    projection_bias += sum(
+                        weight * offsets[source_index]
+                        for source_index, weight in zip(
+                            projection_indices,
+                            model_projection_weights,
+                        )
+                    )
+                    exported.update(
+                        {
+                            "projection_weight": projection_weights,
+                            "projection_bias": projection_bias,
+                            "projection_input_space": "raw_descriptors",
+                            "preprocessed_projection_weight": model_projection_weights,
+                            "preprocessed_projection_bias": float(
+                                selected["projection_bias"]
+                            ),
+                        }
+                    )
                 projection_terms = []
                 for source_index, coefficient in zip(
-                    selected["projection_indices"],
-                    selected["projection_weight"],
+                    projection_indices,
+                    projection_weights,
                 ):
                     source = previous_names[int(source_index)]
                     projection_terms.append(f"{float(coefficient):.8g}*{source}")
                     if layer_index == 0:
                         active_features.add(str(feature_names[int(source_index)]))
                 projection = " + ".join(projection_terms)
-                projection += f"{float(selected['projection_bias']):+.8g}"
+                projection += f"{projection_bias:+.8g}"
                 inner = (
                     f"{float(selected['gamma']):.8g}*({projection})"
                     f"{float(selected['beta']):+.8g}"
@@ -565,7 +633,7 @@ def export_symbolic_kan(
                 operators.add(str(selected["primitive"]))
                 record = {
                     "variable": variable,
-                    **selected,
+                    **exported,
                     "expression": expression,
                 }
                 unit_records.append(record)
@@ -593,15 +661,33 @@ def export_symbolic_kan(
             f"{float(stds[target_index]):.8g}*({scaled_expression})"
             f"{float(means[target_index]):+.8g}"
         )
-        variable_definitions = [
-            {
+        variable_definitions = []
+        for index, name in enumerate(feature_names):
+            if str(name) not in active_features:
+                continue
+            definition: dict[str, Any] = {
                 "variable": f"x{index}",
                 "feature": str(name),
-                "expression": f"preprocessed({name!r})",
+                "expression": (
+                    f"raw_descriptor({name!r})"
+                    if export_raw_inputs
+                    else f"preprocessed({name!r})"
+                ),
+                "input_space": (
+                    "raw_descriptor"
+                    if export_raw_inputs
+                    else "preprocessed_descriptor"
+                ),
             }
-            for index, name in enumerate(feature_names)
-            if str(name) in active_features
-        ]
+            if export_raw_inputs:
+                definition.update(
+                    {
+                        "impute_value": impute_values[index],
+                        "folded_scale": scales[index],
+                        "folded_offset": offsets[index],
+                    }
+                )
+            variable_definitions.append(definition)
         target_record = {
             "target": target_name,
             "expression": expression,
@@ -623,9 +709,16 @@ def export_symbolic_kan(
         payload["targets"].append(target_record)
         report.append(f"target = {target_name}")
         for definition in variable_definitions:
-            report.append(
+            variable_line = (
                 f"  {definition['variable']} = {definition['expression']}"
             )
+            impute_value = definition.get("impute_value")
+            if impute_value is not None and impute_value == impute_value:
+                variable_line += (
+                    f"  [missing -> training impute value "
+                    f"{float(impute_value):.8g}]"
+                )
+            report.append(variable_line)
         for definition in definitions:
             report.append(
                 f"  {definition['variable']} = {definition['expression']}"

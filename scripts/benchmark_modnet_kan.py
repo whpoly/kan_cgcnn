@@ -410,7 +410,7 @@ def parse_args() -> argparse.Namespace:
             "training for formula fidelity calibration."
         ),
     )
-    parser.add_argument("--symbolic-hidden-dims", type=int, nargs="+", default=[8, 4])
+    parser.add_argument("--symbolic-hidden-dims", type=int, nargs="+", default=[4])
     parser.add_argument("--symbolic-edges-per-unit", type=int, default=3)
     parser.add_argument(
         "--symbolic-primitives",
@@ -429,7 +429,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--symbolic-target-density", type=float, default=0.75)
     parser.add_argument("--symbolic-gate-lr-scale", type=float, default=0.2)
     parser.add_argument("--symbolic-unit-threshold", type=float, default=0.5)
-    parser.add_argument("--symbolic-projection-top-k", type=int, default=5)
+    parser.add_argument("--symbolic-projection-top-k", type=int, default=3)
     parser.add_argument("--symbolic-hardening-epochs", type=int, default=100)
     parser.add_argument("--symbolic-hardening-lr", type=float, default=1e-4)
     parser.add_argument(
@@ -1335,6 +1335,54 @@ def benchmark_forward(
     return 1000.0 * (time.perf_counter() - start) / forward_iters
 
 
+def feature_preprocessing_affine(
+    prepared: dict[str, Any],
+) -> tuple[list[float], list[float], list[float]]:
+    pipeline = prepared.get("feature_pipeline")
+    if pipeline is None:
+        processor = prepared.get("processor")
+        pipeline = getattr(processor, "pipeline_", None)
+    if pipeline is None:
+        raise ValueError(
+            "Symbolic-KAN raw formula export requires a fitted feature pipeline"
+        )
+
+    n_features = len(prepared["selected_features"])
+    imputer = pipeline.named_steps.get("imputer")
+    if imputer is None or not hasattr(imputer, "statistics_"):
+        raise ValueError(
+            "Symbolic-KAN raw formula export requires fitted imputation statistics"
+        )
+    impute_values = np.asarray(imputer.statistics_, dtype=float)
+
+    scaler = pipeline.named_steps.get("scaler")
+    if isinstance(scaler, MinMaxScaler):
+        scales = np.asarray(scaler.scale_, dtype=float)
+        offsets = np.asarray(scaler.min_, dtype=float)
+    elif isinstance(scaler, StandardScaler):
+        standard_scale = np.asarray(scaler.scale_, dtype=float)
+        scales = 1.0 / standard_scale
+        offsets = -np.asarray(scaler.mean_, dtype=float) / standard_scale
+    elif scaler is None:
+        scales = np.ones(n_features, dtype=float)
+        offsets = np.zeros(n_features, dtype=float)
+    else:
+        raise TypeError(
+            "Unsupported feature scaler for Symbolic-KAN raw formula export: "
+            f"{type(scaler).__name__}"
+        )
+
+    if (
+        len(scales) != n_features
+        or len(offsets) != n_features
+        or len(impute_values) != n_features
+    ):
+        raise ValueError(
+            "Fitted feature preprocessing parameters do not match selected features"
+        )
+    return scales.tolist(), offsets.tolist(), impute_values.tolist()
+
+
 def harden_and_evaluate_symbolic_kan(
     model: SymbolicKAN,
     train_loader: DataLoader,
@@ -1405,11 +1453,17 @@ def harden_and_evaluate_symbolic_kan(
         np.asarray(prepared["target_scaler"].std, dtype=float),
         (len(target_names),),
     )
+    feature_scales, feature_offsets, feature_impute_values = (
+        feature_preprocessing_affine(prepared)
+    )
     payload, text = export_symbolic_kan(
         model,
         prepared["selected_features"],
         target_means=scaler_mean.tolist(),
         target_stds=scaler_std.tolist(),
+        feature_scales=feature_scales,
+        feature_offsets=feature_offsets,
+        feature_impute_values=feature_impute_values,
     )
     for target_index, record in enumerate(payload["targets"]):
         hard_column = hard_2d[:, target_index]

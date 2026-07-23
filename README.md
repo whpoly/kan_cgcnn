@@ -313,8 +313,11 @@ official MODNet descriptors:
   It reports raw KAN MAE, the exact B-spline expression, and a compact
   pykan-style edge-wise `auto_symbolic` formula with its own outer-test MAE.
 - `symbolic-kan`: the discrete gated architecture from arXiv:2603.23854,
-  `32 -> 8 -> 4 -> sum`, with three candidate projections per unit. It reports
-  relaxed/soft MAE and the MAE of the hardened analytic formula.
+  `32 -> 4 -> sum`, with three candidate projections per unit and at most three
+  descriptors retained in each hardened projection. It reports relaxed/soft
+  MAE and the MAE of the hardened analytic formula. The exported formula folds
+  the fitted input scaler into its first-layer coefficients, so its variables
+  are raw descriptors; training-fold imputation values remain recorded.
 
 Per-task combined results are written to
 `interpretable-kan-benchmark-<dataset>.csv/.json`. Fold formulas and stability

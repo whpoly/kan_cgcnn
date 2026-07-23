@@ -8,6 +8,69 @@ from cgcnn_pyg_kan.spline_symbolic import fit_edge_function
 from cgcnn_pyg_kan.symbolic_kan import SymbolicKAN, export_symbolic_kan
 
 
+def test_symbolic_kan_defaults_to_one_direct_symbolic_layer() -> None:
+    model = SymbolicKAN(6, ["target"])
+
+    assert model.hidden_dims == [4]
+    assert len(model.networks[0].layers) == 1
+    assert model.networks[0].layers[0].out_features == 4
+
+
+def test_symbolic_kan_export_folds_input_scaling_into_raw_formula() -> None:
+    model = SymbolicKAN(
+        2,
+        ["target"],
+        hidden_dims=[1],
+        edges_per_unit=1,
+        primitives=["identity"],
+    )
+    layer = model.networks[0].layers[0]
+    with torch.no_grad():
+        layer.projection_weight[0, 0].copy_(torch.tensor([2.0, -3.0]))
+        layer.projection_bias[0, 0] = 0.4
+        layer.gamma.fill_(1.5)
+        layer.beta.fill_(-0.2)
+        layer.amplitude.fill_(0.7)
+        layer.output_bias.fill_(0.1)
+    model.harden(unit_threshold=0.5, projection_top_k=2)
+
+    raw = np.asarray([7.0, 20.0], dtype=np.float32)
+    scales = np.asarray([0.1, 0.01], dtype=np.float32)
+    offsets = np.asarray([-0.5, -0.25], dtype=np.float32)
+    preprocessed = raw * scales + offsets
+    model_value = float(model(torch.from_numpy(preprocessed[None, :])).item())
+
+    payload, text = export_symbolic_kan(
+        model,
+        ["density", "melting_temperature"],
+        target_means=[5.0],
+        target_stds=[2.0],
+        feature_scales=scales,
+        feature_offsets=offsets,
+        feature_impute_values=[6.0, 18.0],
+    )
+    unit = payload["targets"][0]["layers"][0]["units"][0]
+    indices = np.asarray(unit["projection_indices"], dtype=int)
+    raw_projection = float(
+        np.dot(np.asarray(unit["projection_weight"]), raw[indices])
+        + unit["projection_bias"]
+    )
+    raw_unit_value = (
+        unit["amplitude"]
+        * (unit["gamma"] * raw_projection + unit["beta"])
+        + unit["output_bias"]
+    )
+    raw_formula_value = 2.0 * raw_unit_value + 5.0
+
+    assert np.isclose(raw_formula_value, 2.0 * model_value + 5.0)
+    assert payload["input_space"] == "raw_descriptors"
+    assert np.allclose(unit["projection_weight"], [0.2, -0.03])
+    assert np.isclose(unit["projection_bias"], 0.15)
+    assert "raw_descriptor('density')" in text
+    assert "preprocessed(" not in text
+    assert "missing -> training impute value 6" in text
+
+
 def test_paper_symbolic_kan_soft_hard_and_formula_export() -> None:
     torch.manual_seed(4)
     model = SymbolicKAN(
