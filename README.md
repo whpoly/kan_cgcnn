@@ -299,6 +299,28 @@ python -u scripts\run_official_modnet_matbench.py `
   --output-dir benchmarks\official-modnet-v012-small
 ```
 
+To reuse completed official folds and run only the fixed interpretable
+five-fold benchmark, submit:
+
+```bash
+sbatch --export=ALL,RUN_MODE=fixed5fold,TASK_SET=small,OFFICIAL_OUTPUT_DIR=benchmarks/official-modnet-v012-small,RUN_ID=interpretable-01,ENV_NAME=modnet-kan scripts/slurm_modnet_kan_unified.sh
+```
+
+This mode trains two independent models on the same first 32 fold-specific
+official MODNet descriptors:
+
+- `direct-spline`: `32 -> 8 -> output`, cubic B-spline KAN, 1000 epochs.
+  It reports raw KAN MAE, the exact B-spline expression, and a compact
+  pykan-style edge-wise `auto_symbolic` formula with its own outer-test MAE.
+- `symbolic-kan`: the discrete gated architecture from arXiv:2603.23854,
+  `32 -> 8 -> 4 -> sum`, with three candidate projections per unit. It reports
+  relaxed/soft MAE and the MAE of the hardened analytic formula.
+
+Per-task combined results are written to
+`interpretable-kan-benchmark-<dataset>.csv/.json`. Fold formulas and stability
+reports remain under the `direct-spline`, `symbolic-kan`,
+`compare-direct-spline`, and `compare-symbolic-kan` subdirectories.
+
 This mirrors the MODNet v0.1.12 Matbench setup: `DeBreuck2020Featurizer` for
 structure tasks, `CompositionOnlyFeaturizer` for composition tasks,
 MODNet's own relevance-redundancy feature selection, `EnsembleMODNetModel`,

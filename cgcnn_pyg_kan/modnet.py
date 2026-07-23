@@ -96,6 +96,7 @@ def _make_block(
     kan_impl: Literal["spline", "fastkan"],
     kan_grid_size: int,
     kan_spline_order: int,
+    kan_use_layernorm: bool,
     dropout: float,
     batch_norm: bool,
     mlp_activation: type[nn.Module],
@@ -112,6 +113,7 @@ def _make_block(
             dropout=dropout,
             grid_size=kan_grid_size,
             spline_order=kan_spline_order,
+            use_layernorm=kan_use_layernorm,
         )
         if batch_norm:
             block = nn.Sequential(block, nn.BatchNorm1d(hidden_dims[-1]))
@@ -147,6 +149,7 @@ def _make_output_head(
     kan_impl: Literal["spline", "fastkan"],
     kan_grid_size: int,
     kan_spline_order: int,
+    kan_use_layernorm: bool,
 ) -> nn.Module:
     if head_type == "linear":
         return nn.Linear(in_dim, out_dim)
@@ -158,6 +161,7 @@ def _make_output_head(
             impl=kan_impl,
             grid_size=kan_grid_size,
             spline_order=kan_spline_order,
+            use_layernorm=kan_use_layernorm,
         )
     raise ValueError(f"unsupported output_head_type {head_type!r}")
 
@@ -184,6 +188,7 @@ class MODNetKAN(nn.Module):
         kan_impl: Literal["spline", "fastkan"] = "fastkan",
         kan_grid_size: int = 5,
         kan_spline_order: int = 3,
+        kan_use_layernorm: bool = True,
         dropout: float = 0.0,
         batch_norm_multi_target: bool = True,
         squeeze_single_target: bool = True,
@@ -217,6 +222,7 @@ class MODNetKAN(nn.Module):
             kan_impl,
             kan_grid_size,
             kan_spline_order,
+            kan_use_layernorm,
             dropout,
             use_batch_norm,
             mlp_activation_type,
@@ -239,6 +245,7 @@ class MODNetKAN(nn.Module):
                 kan_impl,
                 kan_grid_size,
                 kan_spline_order,
+                kan_use_layernorm,
                 dropout,
                 use_batch_norm,
                 mlp_activation_type,
@@ -257,6 +264,7 @@ class MODNetKAN(nn.Module):
                     kan_impl,
                     kan_grid_size,
                     kan_spline_order,
+                    kan_use_layernorm,
                     dropout,
                     use_batch_norm,
                     mlp_activation_type,
@@ -271,6 +279,7 @@ class MODNetKAN(nn.Module):
                     kan_impl,
                     kan_grid_size,
                     kan_spline_order,
+                    kan_use_layernorm,
                     dropout,
                     use_batch_norm,
                     mlp_activation_type,
@@ -284,6 +293,7 @@ class MODNetKAN(nn.Module):
                     kan_impl,
                     kan_grid_size,
                     kan_spline_order,
+                    kan_use_layernorm,
                 )
                 self.output_slices[prop_key] = (cursor, cursor + len(prop_targets))
                 cursor += len(prop_targets)

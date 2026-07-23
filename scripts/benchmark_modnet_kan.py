@@ -31,7 +31,22 @@ if str(ROOT) not in sys.path:
 from cgcnn_pyg_kan.kan import FastKANLinear, KANLinear
 from cgcnn_pyg_kan.modnet import MODNetKAN
 from cgcnn_pyg_kan.modnet_features import MODNetFeatureProcessor, make_feature_frame
-from cgcnn_pyg_kan.pruning import PruningMasks, apply_kan_pruning, kan_sparsity_penalty
+from cgcnn_pyg_kan.pruning import (
+    PruningMasks,
+    apply_kan_pruning,
+    iter_kan_modules,
+    kan_sparsity_penalty,
+)
+from cgcnn_pyg_kan.spline_symbolic import (
+    SPLINE_SYMBOLIC_FUNCTIONS,
+    symbolify_spline_kan,
+)
+from cgcnn_pyg_kan.symbolic_kan import (
+    SYMBOLIC_PRIMITIVES,
+    SymbolicKAN,
+    SymbolicRegularization,
+    export_symbolic_kan,
+)
 
 FEATURE_PRESETS = [
     "auto",
@@ -46,6 +61,7 @@ MODEL_CHOICES = [
     "hybrid-spline",
     "direct-fastkan",
     "direct-spline",
+    "symbolic-kan",
     "fastkan",
     "spline",
     "kan",
@@ -198,6 +214,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--kan-impl", choices=["fastkan", "spline"], default="fastkan")
     parser.add_argument("--kan-grid-size", type=int, default=5)
     parser.add_argument("--kan-spline-order", type=int, default=3)
+    parser.set_defaults(kan_layernorm=True)
+    parser.add_argument(
+        "--kan-layernorm",
+        dest="kan_layernorm",
+        action="store_true",
+        help="Use LayerNorm between hidden KAN layers (default).",
+    )
+    parser.add_argument(
+        "--no-kan-layernorm",
+        dest="kan_layernorm",
+        action="store_false",
+        help=(
+            "Keep hidden KAN layers as pure sums of edge functions. Required "
+            "for native compositional KAN symbolification."
+        ),
+    )
     parser.add_argument(
         "--activation",
         choices=["relu", "elu", "silu"],
@@ -378,6 +410,50 @@ def parse_args() -> argparse.Namespace:
             "training for formula fidelity calibration."
         ),
     )
+    parser.add_argument("--symbolic-hidden-dims", type=int, nargs="+", default=[8, 4])
+    parser.add_argument("--symbolic-edges-per-unit", type=int, default=3)
+    parser.add_argument(
+        "--symbolic-primitives",
+        nargs="+",
+        choices=SYMBOLIC_PRIMITIVES,
+        default=list(SYMBOLIC_PRIMITIVES),
+    )
+    parser.add_argument("--symbolic-temperature-start", type=float, default=2.0)
+    parser.add_argument("--symbolic-temperature-end", type=float, default=0.1)
+    parser.add_argument("--symbolic-selection-lambda", type=float, default=1e-3)
+    parser.add_argument("--symbolic-entropy-weight", type=float, default=1.0)
+    parser.add_argument("--symbolic-nms-weight", type=float, default=0.1)
+    parser.add_argument("--symbolic-unit-weight", type=float, default=1e-3)
+    parser.add_argument("--symbolic-bias-weight", type=float, default=1e-4)
+    parser.add_argument("--symbolic-projection-l1", type=float, default=1e-5)
+    parser.add_argument("--symbolic-target-density", type=float, default=0.75)
+    parser.add_argument("--symbolic-gate-lr-scale", type=float, default=0.2)
+    parser.add_argument("--symbolic-unit-threshold", type=float, default=0.5)
+    parser.add_argument("--symbolic-projection-top-k", type=int, default=5)
+    parser.add_argument("--symbolic-hardening-epochs", type=int, default=100)
+    parser.add_argument("--symbolic-hardening-lr", type=float, default=1e-4)
+    parser.add_argument(
+        "--symbolify-spline-kan",
+        action="store_true",
+        help=(
+            "Apply KAN-paper/pykan-style edge auto-symbolification to a trained "
+            "two-layer direct spline KAN and evaluate the replaced formula."
+        ),
+    )
+    parser.add_argument(
+        "--spline-symbolic-functions",
+        nargs="+",
+        choices=SPLINE_SYMBOLIC_FUNCTIONS,
+        default=list(SPLINE_SYMBOLIC_FUNCTIONS),
+    )
+    parser.add_argument("--spline-symbolic-input-edges", type=int, default=5)
+    parser.add_argument("--spline-symbolic-output-edges", type=int, default=4)
+    parser.add_argument("--spline-symbolic-max-fit-samples", type=int, default=1024)
+    parser.add_argument("--spline-symbolic-search-range", type=float, default=10.0)
+    parser.add_argument("--spline-symbolic-grid-size", type=int, default=21)
+    parser.add_argument("--spline-symbolic-iterations", type=int, default=2)
+    parser.add_argument("--spline-symbolic-complexity-weight", type=float, default=0.2)
+    parser.add_argument("--spline-symbolic-epsilon", type=float, default=1e-3)
     parser.add_argument(
         "--no-matbench-records",
         action="store_true",
@@ -489,6 +565,32 @@ def adamw_parameter_groups(
     if no_decay_params:
         groups.append({"params": no_decay_params, "weight_decay": 0.0})
     return groups
+
+
+def make_optimizer(
+    model: torch.nn.Module,
+    args: argparse.Namespace,
+) -> torch.optim.Optimizer:
+    if isinstance(model, SymbolicKAN):
+        groups = [
+            {
+                "params": model.continuous_parameters(),
+                "lr": args.lr,
+                "weight_decay": args.weight_decay,
+            },
+            {
+                "params": model.gate_parameters(),
+                "lr": args.lr * args.symbolic_gate_lr_scale,
+                "weight_decay": 0.0,
+            },
+        ]
+        return torch.optim.AdamW(groups) if args.weight_decay else torch.optim.Adam(groups)
+    if args.weight_decay == 0:
+        return torch.optim.Adam(model.parameters(), lr=args.lr)
+    return torch.optim.AdamW(
+        adamw_parameter_groups(model, args.weight_decay),
+        lr=args.lr,
+    )
 
 
 def select_subset(items, targets, size: int | None, seed: int):
@@ -935,8 +1037,27 @@ def build_model(
     n_feat: int,
     target_names: list[str],
     args: argparse.Namespace,
-) -> MODNetKAN:
+) -> torch.nn.Module:
     family = canonical_model_name(model_name, args)
+    if family == "symbolic-kan":
+        return SymbolicKAN(
+            in_features=n_feat,
+            target_names=target_names,
+            hidden_dims=clean_hidden_dims(args.symbolic_hidden_dims),
+            edges_per_unit=args.symbolic_edges_per_unit,
+            primitives=args.symbolic_primitives,
+            temperature_start=args.symbolic_temperature_start,
+            temperature_end=args.symbolic_temperature_end,
+            regularization=SymbolicRegularization(
+                selection=args.symbolic_selection_lambda,
+                entropy=args.symbolic_entropy_weight,
+                nms=args.symbolic_nms_weight,
+                unit=args.symbolic_unit_weight,
+                bias=args.symbolic_bias_weight,
+                projection_l1=args.symbolic_projection_l1,
+                target_density=args.symbolic_target_density,
+            ),
+        )
     common_dims, group_dims, property_dims, target_dims = model_dims_for_family(family, args)
     if family.startswith("hybrid-"):
         block_types = ("mlp", "mlp", "mlp", "kan")
@@ -970,6 +1091,7 @@ def build_model(
         kan_impl=kan_impl_for_family(family, args.kan_impl),
         kan_grid_size=args.kan_grid_size,
         kan_spline_order=args.kan_spline_order,
+        kan_use_layernorm=args.kan_layernorm,
         dropout=args.dropout,
     )
     model.architecture = architecture  # type: ignore[attr-defined]
@@ -986,6 +1108,8 @@ def model_dims_for_family(
     family: str,
     args: argparse.Namespace,
 ) -> tuple[list[int], list[int], list[int], list[int]]:
+    if family == "symbolic-kan":
+        return ([], [], [], clean_hidden_dims(args.symbolic_hidden_dims))
     if family == "mlp":
         return (
             clean_hidden_dims(args.mlp_common_dims or args.common_dims),
@@ -1056,6 +1180,7 @@ def train_one_epoch(
     kan_l1_lambda: float = 0.0,
     kan_sparsity_mode: str = "edge-group",
     pruning_masks: PruningMasks | None = None,
+    use_symbolic_regularization: bool = True,
 ) -> float:
     model.train()
     total_loss = 0.0
@@ -1070,6 +1195,8 @@ def train_one_epoch(
             loss = loss + kan_l1_lambda * kan_sparsity_penalty(
                 model, kan_sparsity_mode
             )
+        if use_symbolic_regularization and isinstance(model, SymbolicKAN):
+            loss = loss + model.symbolic_regularization()
         loss.backward()
         optimizer.step()
         if pruning_masks is not None:
@@ -1206,6 +1333,291 @@ def benchmark_forward(
         _ = model(batch)
     sync(device)
     return 1000.0 * (time.perf_counter() - start) / forward_iters
+
+
+def harden_and_evaluate_symbolic_kan(
+    model: SymbolicKAN,
+    train_loader: DataLoader,
+    test_loader: DataLoader,
+    prepared: dict[str, Any],
+    args: argparse.Namespace,
+    device: torch.device,
+    task_type: str,
+    target_names: list[str],
+    soft_prediction: torch.Tensor,
+    test_target: torch.Tensor,
+    fold: int,
+) -> dict[str, float | int | str]:
+    model.harden(
+        unit_threshold=args.symbolic_unit_threshold,
+        projection_top_k=args.symbolic_projection_top_k,
+    )
+    hard_optimizer = torch.optim.Adam(
+        model.continuous_parameters(),
+        lr=args.symbolic_hardening_lr,
+    )
+    start = time.perf_counter()
+    for epoch in range(1, args.symbolic_hardening_epochs + 1):
+        loss = train_one_epoch(
+            model,
+            train_loader,
+            hard_optimizer,
+            device,
+            task_type,
+            args.loss,
+            use_symbolic_regularization=False,
+        )
+        if args.log_every_epochs > 0 and (
+            epoch == 1
+            or epoch == args.symbolic_hardening_epochs
+            or epoch % args.log_every_epochs == 0
+        ):
+            print(
+                f"[symbolic-kan] hardening fine-tune "
+                f"{epoch}/{args.symbolic_hardening_epochs} loss={loss:.6g}",
+                flush=True,
+            )
+    hardening_seconds = time.perf_counter() - start
+
+    hard_prediction, hard_target = predict_loader(
+        model,
+        test_loader,
+        prepared["target_scaler"],
+        device,
+        task_type,
+    )
+    hard_metrics = metrics_from_predictions(
+        hard_prediction,
+        hard_target,
+        task_type,
+        target_names=target_names,
+    )
+    soft_2d = soft_prediction.reshape(len(soft_prediction), -1)
+    hard_2d = hard_prediction.reshape(len(hard_prediction), -1)
+    target_2d = test_target.reshape(len(test_target), -1)
+    fidelity_r2_values = []
+
+    scaler_mean = np.broadcast_to(
+        np.asarray(prepared["target_scaler"].mean, dtype=float),
+        (len(target_names),),
+    )
+    scaler_std = np.broadcast_to(
+        np.asarray(prepared["target_scaler"].std, dtype=float),
+        (len(target_names),),
+    )
+    payload, text = export_symbolic_kan(
+        model,
+        prepared["selected_features"],
+        target_means=scaler_mean.tolist(),
+        target_stds=scaler_std.tolist(),
+    )
+    for target_index, record in enumerate(payload["targets"]):
+        hard_column = hard_2d[:, target_index]
+        soft_column = soft_2d[:, target_index]
+        target_column = target_2d[:, target_index]
+        fidelity_r2 = (
+            float(
+                r2_score(
+                    soft_column.numpy(),
+                    hard_column.numpy(),
+                )
+            )
+            if len(hard_column) >= 2
+            else float("nan")
+        )
+        fidelity_r2_values.append(fidelity_r2)
+        record["test_target_mae"] = float(
+            torch.mean(torch.abs(hard_column - target_column))
+        )
+        record["test_teacher_mae"] = float(
+            torch.mean(torch.abs(hard_column - soft_column))
+        )
+        record["test_fidelity_r2"] = fidelity_r2
+
+    output_dir = Path(args.output_dir)
+    text_path = output_dir / (
+        f"symbolic-kan-formula-{args.dataset}-fold{fold}.txt"
+    )
+    json_path = output_dir / (
+        f"symbolic-kan-formula-{args.dataset}-fold{fold}.json"
+    )
+    payload.update(
+        {
+            "fold": fold,
+            "soft_test_mae": float(
+                torch.mean(torch.abs(soft_2d - target_2d))
+            ),
+            "hard_test_mae": hard_metrics["mae"],
+            "hardening_epochs": args.symbolic_hardening_epochs,
+            "hardening_seconds": hardening_seconds,
+            "unit_threshold": args.symbolic_unit_threshold,
+            "projection_top_k": args.symbolic_projection_top_k,
+        }
+    )
+    json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    metric_lines = [
+        "",
+        f"soft_test_mae = {payload['soft_test_mae']:.8g}",
+        f"hard_formula_test_mae = {hard_metrics['mae']:.8g}",
+        "hard_formula_to_soft_r2 = "
+        + f"{float(np.mean(fidelity_r2_values)):.8g}",
+    ]
+    text_path.write_text(text + "\n".join(metric_lines), encoding="utf-8")
+
+    active_features = sorted(
+        {
+            feature
+            for record in payload["targets"]
+            for feature in record["active_feature_names"]
+        }
+    )
+    operators = sorted(
+        {
+            operator
+            for record in payload["targets"]
+            for operator in record["operators"]
+        }
+    )
+    active_units = sum(
+        int(record["n_active_units"]) for record in payload["targets"]
+    )
+    return {
+        "symbolic_kan_formula_path": str(text_path),
+        "symbolic_kan_json_path": str(json_path),
+        "symbolic_kan_soft_test_mae": float(
+            torch.mean(torch.abs(soft_2d - target_2d))
+        ),
+        "symbolic_kan_hard_test_mae": hard_metrics["mae"],
+        "symbolic_kan_hard_test_rmse": hard_metrics["rmse"],
+        "symbolic_kan_hard_test_r2": hard_metrics["r2"],
+        "symbolic_kan_test_teacher_mae": float(
+            torch.mean(torch.abs(hard_2d - soft_2d))
+        ),
+        "symbolic_kan_test_fidelity_r2_pct": 100.0
+        * float(np.mean(fidelity_r2_values)),
+        "symbolic_kan_active_features": ",".join(active_features),
+        "symbolic_kan_operators": ",".join(operators),
+        "symbolic_kan_active_units": active_units,
+        "symbolic_kan_hardening_epochs": args.symbolic_hardening_epochs,
+        "symbolic_kan_hardening_seconds": hardening_seconds,
+    }
+
+
+def symbolify_and_evaluate_spline_kan(
+    model: torch.nn.Module,
+    prepared: dict[str, Any],
+    args: argparse.Namespace,
+    target_names: list[str],
+    teacher_prediction: torch.Tensor,
+    test_target: torch.Tensor,
+    fold: int,
+) -> dict[str, float | int | str]:
+    layers = [
+        module
+        for module in iter_kan_modules(model)
+        if isinstance(module, KANLinear)
+    ]
+    symbolic_scaled, payload, text = symbolify_spline_kan(
+        layers,
+        prepared["x_formula_train"],
+        prepared["x_test"],
+        prepared["selected_features"],
+        target_names,
+        functions=args.spline_symbolic_functions,
+        input_edges_per_hidden=args.spline_symbolic_input_edges,
+        output_edges_per_target=args.spline_symbolic_output_edges,
+        max_fit_samples=args.spline_symbolic_max_fit_samples,
+        search_range=args.spline_symbolic_search_range,
+        grid_size=args.spline_symbolic_grid_size,
+        iterations=args.spline_symbolic_iterations,
+        complexity_weight=args.spline_symbolic_complexity_weight,
+        epsilon=args.spline_symbolic_epsilon,
+    )
+    symbolic_prediction = prepared["target_scaler"].inverse_transform_tensor(
+        torch.from_numpy(symbolic_scaled)
+    )
+    teacher_2d = teacher_prediction.reshape(len(teacher_prediction), -1)
+    formula_2d = symbolic_prediction.reshape(len(symbolic_prediction), -1)
+    target_2d = test_target.reshape(len(test_target), -1)
+    formula_metrics = metrics_from_predictions(
+        symbolic_prediction,
+        test_target,
+        "regression",
+        target_names=target_names,
+    )
+    fidelity_values = []
+    for target_index, record in enumerate(payload["targets"]):
+        formula_column = formula_2d[:, target_index]
+        teacher_column = teacher_2d[:, target_index]
+        target_column = target_2d[:, target_index]
+        fidelity = (
+            float(r2_score(teacher_column.numpy(), formula_column.numpy()))
+            if len(formula_column) >= 2
+            else float("nan")
+        )
+        fidelity_values.append(fidelity)
+        record["test_target_mae"] = float(
+            torch.mean(torch.abs(formula_column - target_column))
+        )
+        record["test_teacher_mae"] = float(
+            torch.mean(torch.abs(formula_column - teacher_column))
+        )
+        record["test_fidelity_r2"] = fidelity
+
+    output_dir = Path(args.output_dir)
+    text_path = output_dir / (
+        f"spline-symbolic-formula-{args.dataset}-fold{fold}.txt"
+    )
+    json_path = output_dir / (
+        f"spline-symbolic-formula-{args.dataset}-fold{fold}.json"
+    )
+    payload.update(
+        {
+            "fold": fold,
+            "teacher_test_mae": float(
+                torch.mean(torch.abs(teacher_2d - target_2d))
+            ),
+            "formula_test_mae": formula_metrics["mae"],
+        }
+    )
+    json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    text_path.write_text(
+        text
+        + "\n"
+        + f"teacher_test_mae = {payload['teacher_test_mae']:.8g}\n"
+        + f"symbolic_formula_test_mae = {formula_metrics['mae']:.8g}\n"
+        + "formula_to_teacher_r2 = "
+        + f"{float(np.mean(fidelity_values)):.8g}\n",
+        encoding="utf-8",
+    )
+    active_features = sorted(
+        {
+            feature
+            for record in payload["targets"]
+            for feature in record["active_feature_names"]
+        }
+    )
+    operators = sorted(
+        {
+            operator
+            for record in payload["targets"]
+            for operator in record["operators"]
+        }
+    )
+    edge_count = sum(int(record["n_edges"]) for record in payload["targets"])
+    return {
+        "spline_symbolic_formula_path": str(text_path),
+        "spline_symbolic_json_path": str(json_path),
+        "spline_symbolic_test_target_mae": formula_metrics["mae"],
+        "spline_symbolic_test_teacher_mae": float(
+            torch.mean(torch.abs(formula_2d - teacher_2d))
+        ),
+        "spline_symbolic_test_fidelity_r2_pct": 100.0
+        * float(np.mean(fidelity_values)),
+        "spline_symbolic_active_features": ",".join(active_features),
+        "spline_symbolic_operators": ",".join(operators),
+        "spline_symbolic_n_edges": edge_count,
+    }
 
 
 @torch.no_grad()
@@ -2015,14 +2427,7 @@ def run_model(
         target_names=target_names,
         args=args,
     ).to(device)
-    optimizer = (
-        torch.optim.Adam(model.parameters(), lr=args.lr)
-        if args.weight_decay == 0
-        else torch.optim.AdamW(
-            adamw_parameter_groups(model, args.weight_decay),
-            lr=args.lr,
-        )
-    )
+    optimizer = make_optimizer(model, args)
     train_loader = make_loader(
         prepared["x_train"],
         prepared["y_train_scaled"],
@@ -2057,6 +2462,10 @@ def run_model(
     train_start = time.perf_counter()
     for epoch in range(1, args.epochs + 1):
         epochs_ran = epoch
+        if isinstance(model, SymbolicKAN):
+            model.set_progress(
+                (epoch - 1) / max(args.epochs - 1, 1)
+            )
         train_loss = train_one_epoch(
             model,
             train_loader,
@@ -2283,9 +2692,23 @@ def run_model(
         "model": model_label,
         "architecture": getattr(model, "architecture", "unknown"),
         "block_type": "mlp" if model_label == "mlp" else "hybrid" if model_label.startswith("hybrid-") else "kan",
-        "kan_impl": kan_impl_for_family(model_label, args.kan_impl) if is_kan_family(model_label) else "none",
-        "kan_grid_size": args.kan_grid_size if is_kan_family(model_label) else "none",
-        "kan_spline_order": args.kan_spline_order if kan_impl_for_family(model_label, args.kan_impl) == "spline" else "none",
+        "kan_impl": (
+            "symbolic-primitives"
+            if model_label == "symbolic-kan"
+            else kan_impl_for_family(model_label, args.kan_impl)
+            if is_kan_family(model_label)
+            else "none"
+        ),
+        "kan_grid_size": (
+            "none" if model_label == "symbolic-kan"
+            else args.kan_grid_size if is_kan_family(model_label) else "none"
+        ),
+        "kan_spline_order": (
+            args.kan_spline_order
+            if kan_impl_for_family(model_label, args.kan_impl) == "spline"
+            and model_label != "symbolic-kan"
+            else "none"
+        ),
         "common_dims": "-".join(str(value) for value in common_dims),
         "group_dims": "-".join(str(value) for value in group_dims),
         "property_dims": "-".join(str(value) for value in property_dims),
@@ -2328,11 +2751,28 @@ def run_model(
         "train_seconds": train_seconds,
         "forward_ms_per_batch": forward_ms,
     }
+    if model_label == "symbolic-kan":
+        row.update(
+            {
+                "symbolic_hidden_dims": "-".join(
+                    str(value) for value in args.symbolic_hidden_dims
+                ),
+                "symbolic_edges_per_unit": args.symbolic_edges_per_unit,
+                "symbolic_primitives": ",".join(args.symbolic_primitives),
+                "symbolic_temperature_start": args.symbolic_temperature_start,
+                "symbolic_temperature_end": args.symbolic_temperature_end,
+                "symbolic_projection_top_k": args.symbolic_projection_top_k,
+            }
+        )
     for metric_name, value in best_val_metrics.items():
         row[f"best_val_{metric_name}"] = value
     for metric_name, value in test_metrics.items():
         row[f"test_{metric_name}"] = value
-    if args.export_formulas and is_kan_family(model_label):
+    if (
+        args.export_formulas
+        and is_kan_family(model_label)
+        and model_label != "symbolic-kan"
+    ):
         formula_path = (
             Path(args.output_dir)
             / f"formula-{args.dataset}-fold{fold_data['metadata']['fold']}-{model_label}.txt"
@@ -2356,6 +2796,42 @@ def run_model(
             fold_metadata=fold_data["metadata"],
         )
         row["formula_path"] = str(formula_path)
+        if model_label == "direct-spline":
+            row["spline_exact_formula_test_mae"] = test_metrics["mae"]
+    if args.symbolify_spline_kan and model_label == "direct-spline":
+        if task_type != "regression" or test_loader is None:
+            raise ValueError(
+                "Spline KAN auto-symbolic evaluation requires a regression outer test fold"
+            )
+        row.update(
+            symbolify_and_evaluate_spline_kan(
+                model,
+                prepared,
+                args,
+                target_names,
+                test_prediction,
+                test_target,
+                int(fold_data["metadata"]["fold"]),
+            )
+        )
+    if model_label == "symbolic-kan":
+        if test_loader is None:
+            raise ValueError("Symbolic-KAN hard formula evaluation requires the outer test fold")
+        row.update(
+            harden_and_evaluate_symbolic_kan(
+                model,
+                train_loader,
+                test_loader,
+                prepared,
+                args,
+                device,
+                task_type,
+                target_names,
+                test_prediction,
+                test_target,
+                int(fold_data["metadata"]["fold"]),
+            )
+        )
     if args.distill_simple_formula:
         row.update(
             distill_simple_formulas(
@@ -3456,6 +3932,28 @@ def ordered_fieldnames(rows: list[dict[str, Any]]) -> list[str]:
         "params_pruned",
         "params_pruned_pct",
         "formula_path",
+        "spline_exact_formula_test_mae",
+        "spline_symbolic_formula_path",
+        "spline_symbolic_json_path",
+        "spline_symbolic_test_target_mae",
+        "spline_symbolic_test_teacher_mae",
+        "spline_symbolic_test_fidelity_r2_pct",
+        "spline_symbolic_active_features",
+        "spline_symbolic_operators",
+        "spline_symbolic_n_edges",
+        "symbolic_kan_formula_path",
+        "symbolic_kan_json_path",
+        "symbolic_kan_soft_test_mae",
+        "symbolic_kan_hard_test_mae",
+        "symbolic_kan_hard_test_rmse",
+        "symbolic_kan_hard_test_r2",
+        "symbolic_kan_test_teacher_mae",
+        "symbolic_kan_test_fidelity_r2_pct",
+        "symbolic_kan_active_features",
+        "symbolic_kan_operators",
+        "symbolic_kan_active_units",
+        "symbolic_kan_hardening_epochs",
+        "symbolic_kan_hardening_seconds",
         "simple_formula_path",
         "simple_formula_json_path",
         "simple_formula_n_inputs",
@@ -3482,6 +3980,12 @@ def ordered_fieldnames(rows: list[dict[str, Any]]) -> list[str]:
         "group_dims",
         "property_dims",
         "target_dims",
+        "symbolic_hidden_dims",
+        "symbolic_edges_per_unit",
+        "symbolic_primitives",
+        "symbolic_temperature_start",
+        "symbolic_temperature_end",
+        "symbolic_projection_top_k",
         "lr",
         "weight_decay",
         "loss",
@@ -3539,6 +4043,31 @@ def main() -> None:
         name not in {"product", "ratio"} for name in args.simple_formula_functions
     ):
         raise ValueError("symbolic regression needs at least one unary function")
+    if not args.symbolic_hidden_dims or any(
+        value < 1 for value in args.symbolic_hidden_dims
+    ):
+        raise ValueError("--symbolic-hidden-dims must contain positive widths")
+    if args.symbolic_edges_per_unit < 1:
+        raise ValueError("--symbolic-edges-per-unit must be positive")
+    if (
+        args.symbolic_temperature_start <= 0
+        or args.symbolic_temperature_end <= 0
+    ):
+        raise ValueError("Symbolic-KAN temperatures must be positive")
+    if not 0 < args.symbolic_target_density <= 1:
+        raise ValueError("--symbolic-target-density must be in (0, 1]")
+    if not 0 <= args.symbolic_unit_threshold <= 1:
+        raise ValueError("--symbolic-unit-threshold must be in [0, 1]")
+    if args.symbolic_projection_top_k < 1:
+        raise ValueError("--symbolic-projection-top-k must be positive")
+    if args.symbolic_hardening_epochs < 0:
+        raise ValueError("--symbolic-hardening-epochs must be non-negative")
+    if args.symbolify_spline_kan and "direct-spline" not in args.models:
+        raise ValueError("--symbolify-spline-kan requires --models direct-spline")
+    if args.spline_symbolic_grid_size < 3:
+        raise ValueError("--spline-symbolic-grid-size must be at least 3")
+    if args.spline_symbolic_iterations < 1:
+        raise ValueError("--spline-symbolic-iterations must be positive")
     set_seed(args.seed)
     device = resolve_device(args)
     if device.type == "cuda":

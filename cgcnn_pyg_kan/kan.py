@@ -105,6 +105,7 @@ class KANMLP(nn.Module):
         dropout: float = 0.0,
         grid_size: int = 3,
         spline_order: int = 3,
+        use_layernorm: bool = True,
     ) -> None:
         super().__init__()
         if isinstance(hidden_dims, int):
@@ -121,7 +122,8 @@ class KANMLP(nn.Module):
                 )
             )
             if idx < len(dims) - 2:
-                layers.append(nn.LayerNorm(dst))
+                if use_layernorm:
+                    layers.append(nn.LayerNorm(dst))
                 if dropout > 0:
                     layers.append(nn.Dropout(dropout))
         self.net = nn.Sequential(*layers)
@@ -227,6 +229,7 @@ def make_kan_mlp(
     dropout: float = 0.0,
     grid_size: int = 3,
     spline_order: int = 3,
+    use_layernorm: bool = True,
 ) -> nn.Module:
     if impl == "spline":
         return KANMLP(
@@ -236,6 +239,7 @@ def make_kan_mlp(
             dropout=dropout,
             grid_size=grid_size,
             spline_order=spline_order,
+            use_layernorm=use_layernorm,
         )
     if impl == "fastkan":
         return FastKANMLP(
