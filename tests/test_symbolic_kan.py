@@ -111,6 +111,61 @@ def test_paper_symbolic_kan_soft_hard_and_formula_export() -> None:
             )
 
 
+def test_symbolic_kan_selects_shared_features_and_exports_products() -> None:
+    model = SymbolicKAN(
+        8,
+        ["target"],
+        hidden_dims=[2],
+        edges_per_unit=1,
+        primitives=["product"],
+    )
+    layer = model.networks[0].layers[0]
+    with torch.no_grad():
+        layer.projection_weight.zero_()
+        layer.interaction_projection_weight.zero_()
+        layer.projection_weight[0, 0, 0] = 5.0
+        layer.projection_weight[0, 0, 4] = 1.0
+        layer.interaction_projection_weight[0, 0, 1] = 6.0
+        layer.projection_weight[1, 0, 2] = 4.0
+        layer.interaction_projection_weight[1, 0, 3] = 7.0
+        layer.projection_bias.zero_()
+        layer.interaction_projection_bias.zero_()
+        layer.gamma.fill_(1.0)
+        layer.beta.zero_()
+        layer.interaction_gamma.fill_(1.0)
+        layer.interaction_beta.zero_()
+        layer.amplitude.fill_(1.0)
+        layer.output_bias.zero_()
+        layer.unit_logits.fill_(10.0)
+
+    model.harden(
+        unit_threshold=0.5,
+        projection_top_k=1,
+        global_feature_top_k=5,
+    )
+    inputs = torch.tensor(
+        [[2.0, 3.0, 5.0, 7.0, 11.0, 13.0, 17.0, 19.0]]
+    )
+    prediction = float(model(inputs).item())
+    payload, text = export_symbolic_kan(
+        model,
+        [f"feature_{index}" for index in range(8)],
+    )
+    target = payload["targets"][0]
+
+    assert np.isclose(prediction, (5.0 * 2.0) * (6.0 * 3.0) + (4.0 * 5.0) * (7.0 * 7.0))
+    assert payload["global_feature_top_k"] == 5
+    assert target["selected_global_feature_indices"] == [0, 1, 2, 3, 4]
+    assert target["active_feature_names"] == [
+        "feature_0",
+        "feature_1",
+        "feature_2",
+        "feature_3",
+    ]
+    assert target["operators"] == ["product"]
+    assert ")*(" in text
+
+
 def test_spline_edge_symbolic_fit_recovers_sine() -> None:
     x = np.linspace(-1.0, 1.0, 201)
     y = 2.5 * np.sin(3.0 * x - 0.4) + 0.7

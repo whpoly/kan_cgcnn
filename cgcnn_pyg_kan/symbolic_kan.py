@@ -23,13 +23,20 @@ SYMBOLIC_PRIMITIVES = (
     "gaussian",
     "sinh",
     "cosh",
+    "product",
 )
 
 
-def _primitive_library(values: torch.Tensor, names: Sequence[str]) -> torch.Tensor:
+def _primitive_library(
+    values: torch.Tensor,
+    names: Sequence[str],
+    interaction_values: torch.Tensor | None = None,
+) -> torch.Tensor:
     outputs = []
     if values.shape[-1] != len(names):
         raise ValueError("Primitive parameter axis does not match primitive library")
+    if interaction_values is not None and interaction_values.shape != values.shape:
+        raise ValueError("Interaction primitive inputs must match primary inputs")
     for index, name in enumerate(names):
         argument = values[..., index]
         if name == "zero":
@@ -60,6 +67,10 @@ def _primitive_library(values: torch.Tensor, names: Sequence[str]) -> torch.Tens
             result = torch.sinh(argument.clamp(-5.0, 5.0))
         elif name == "cosh":
             result = torch.cosh(argument.clamp(-5.0, 5.0))
+        elif name == "product":
+            if interaction_values is None:
+                raise ValueError("Product primitive requires a second projection")
+            result = argument * interaction_values[..., index]
         else:
             raise ValueError(f"Unsupported Symbolic-KAN primitive {name!r}")
         outputs.append(torch.nan_to_num(result, nan=0.0, posinf=1e4, neginf=-1e4))
@@ -120,9 +131,15 @@ class SymbolicKANLayer(nn.Module):
             torch.empty(out_features, edges_per_unit, in_features)
         )
         self.projection_bias = nn.Parameter(torch.zeros(*shape))
+        self.interaction_projection_weight = nn.Parameter(
+            torch.empty(out_features, edges_per_unit, in_features)
+        )
+        self.interaction_projection_bias = nn.Parameter(torch.zeros(*shape))
         self.primitive_logits = nn.Parameter(torch.zeros(*primitive_shape))
         self.gamma = nn.Parameter(torch.ones(*primitive_shape))
         self.beta = nn.Parameter(torch.zeros(*primitive_shape))
+        self.interaction_gamma = nn.Parameter(torch.ones(*primitive_shape))
+        self.interaction_beta = nn.Parameter(torch.zeros(*primitive_shape))
         self.amplitude = nn.Parameter(torch.empty(*primitive_shape))
         self.output_bias = nn.Parameter(torch.zeros(*primitive_shape))
         self.unit_logits = nn.Parameter(torch.full((out_features,), 2.0))
@@ -143,10 +160,15 @@ class SymbolicKANLayer(nn.Module):
             "hard_projection_mask",
             torch.ones(out_features, edges_per_unit, in_features),
         )
+        self.register_buffer(
+            "hard_interaction_projection_mask",
+            torch.ones(out_features, edges_per_unit, in_features),
+        )
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
         nn.init.xavier_uniform_(self.projection_weight)
+        nn.init.xavier_uniform_(self.interaction_projection_weight)
         nn.init.normal_(self.primitive_logits, mean=0.0, std=0.02)
         nn.init.normal_(self.amplitude, mean=0.0, std=0.2)
 
@@ -195,18 +217,36 @@ class SymbolicKANLayer(nn.Module):
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         projection_weight = self.projection_weight
+        interaction_projection_weight = self.interaction_projection_weight
         if self.hard:
             projection_weight = projection_weight * self.hard_projection_mask
+            interaction_projection_weight = (
+                interaction_projection_weight
+                * self.hard_interaction_projection_mask
+            )
         scalar_projection = torch.einsum(
             "bi,kei->bke",
             inputs,
             projection_weight,
         ) + self.projection_bias
+        interaction_scalar_projection = torch.einsum(
+            "bi,kei->bke",
+            inputs,
+            interaction_projection_weight,
+        ) + self.interaction_projection_bias
         primitive_input = (
             scalar_projection.unsqueeze(-1) * self.gamma
             + self.beta
         )
-        primitives = _primitive_library(primitive_input, self.primitives)
+        interaction_primitive_input = (
+            interaction_scalar_projection.unsqueeze(-1) * self.interaction_gamma
+            + self.interaction_beta
+        )
+        primitives = _primitive_library(
+            primitive_input,
+            self.primitives,
+            interaction_primitive_input,
+        )
         primitive_weights = self._primitive_weights()
         edge_values = torch.sum(
             primitive_weights
@@ -235,7 +275,11 @@ class SymbolicKANLayer(nn.Module):
             "nms": nms,
             "unit_density": unit_density,
             "bias": self.output_bias.square().mean(),
-            "projection_l1": self.projection_weight.abs().mean(),
+            "projection_l1": 0.5
+            * (
+                self.projection_weight.abs().mean()
+                + self.interaction_projection_weight.abs().mean()
+            ),
         }
 
     @torch.no_grad()
@@ -259,12 +303,32 @@ class SymbolicKANLayer(nn.Module):
 
         top_k = min(max(int(projection_top_k), 1), self.in_features)
         mask = torch.zeros_like(self.hard_projection_mask)
+        interaction_mask = torch.zeros_like(
+            self.hard_interaction_projection_mask
+        )
         for unit_index in range(self.out_features):
             edge_index = int(self.hard_edge_index[unit_index])
             weights = self.projection_weight[unit_index, edge_index].abs()
             selected = torch.topk(weights, k=top_k).indices
             mask[unit_index, edge_index, selected] = 1.0
+            primitive_index = int(
+                self.hard_primitive_index[unit_index, edge_index].item()
+            )
+            if self.primitives[primitive_index] == "product":
+                interaction_weights = self.interaction_projection_weight[
+                    unit_index, edge_index
+                ].abs()
+                interaction_selected = torch.topk(
+                    interaction_weights,
+                    k=top_k,
+                ).indices
+                interaction_mask[
+                    unit_index,
+                    edge_index,
+                    interaction_selected,
+                ] = 1.0
         self.hard_projection_mask.copy_(mask)
+        self.hard_interaction_projection_mask.copy_(interaction_mask)
         self.hard = True
 
     def gate_parameters(self) -> list[nn.Parameter]:
@@ -278,7 +342,7 @@ class SymbolicKANLayer(nn.Module):
         live_projection = self.hard_projection_mask[
             unit_index, edge_index
         ].bool()
-        return {
+        record = {
             "alive": bool(self.hard_unit_mask[unit_index].item()),
             "edge_index": edge_index,
             "primitive_index": primitive_index,
@@ -307,6 +371,38 @@ class SymbolicKANLayer(nn.Module):
                 ].detach().cpu()
             ),
         }
+        if self.primitives[primitive_index] == "product":
+            live_interaction_projection = self.hard_interaction_projection_mask[
+                unit_index, edge_index
+            ].bool()
+            record.update(
+                {
+                    "interaction_projection_weight": (
+                        self.interaction_projection_weight[
+                            unit_index, edge_index
+                        ][live_interaction_projection].detach().cpu().tolist()
+                    ),
+                    "interaction_projection_indices": torch.where(
+                        live_interaction_projection
+                    )[0].cpu().tolist(),
+                    "interaction_projection_bias": float(
+                        self.interaction_projection_bias[
+                            unit_index, edge_index
+                        ].detach().cpu()
+                    ),
+                    "interaction_gamma": float(
+                        self.interaction_gamma[
+                            unit_index, edge_index, primitive_index
+                        ].detach().cpu()
+                    ),
+                    "interaction_beta": float(
+                        self.interaction_beta[
+                            unit_index, edge_index, primitive_index
+                        ].detach().cpu()
+                    ),
+                }
+            )
+        return record
 
 
 class SymbolicKANSingleOutput(nn.Module):
@@ -340,6 +436,11 @@ class SymbolicKANSingleOutput(nn.Module):
         )
         self.regularization = regularization
         self.progress = 0.0
+        self.global_feature_top_k: int | None = None
+        self.register_buffer(
+            "hard_global_feature_mask",
+            torch.ones(in_features),
+        )
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         values = inputs
@@ -380,12 +481,120 @@ class SymbolicKANSingleOutput(nn.Module):
         )
 
     @torch.no_grad()
-    def harden(self, *, unit_threshold: float, projection_top_k: int) -> None:
-        for layer in self.layers:
+    def harden(
+        self,
+        *,
+        unit_threshold: float,
+        projection_top_k: int,
+        global_feature_top_k: int | None = None,
+    ) -> None:
+        for layer_index, layer in enumerate(self.layers):
             layer.harden(
                 unit_threshold=unit_threshold,
-                projection_top_k=projection_top_k,
+                projection_top_k=(
+                    layer.in_features
+                    if layer_index == 0 and global_feature_top_k is not None
+                    else projection_top_k
+                ),
             )
+        self.global_feature_top_k = (
+            None
+            if global_feature_top_k is None
+            else min(max(int(global_feature_top_k), 1), self.layers[0].in_features)
+        )
+        if self.global_feature_top_k is None:
+            self.hard_global_feature_mask.fill_(1.0)
+            return
+
+        first_layer = self.layers[0]
+        importance = first_layer.projection_weight.new_zeros(first_layer.in_features)
+        for unit_index in range(first_layer.out_features):
+            if not bool(first_layer.hard_unit_mask[unit_index].item()):
+                continue
+            edge_index = int(first_layer.hard_edge_index[unit_index].item())
+            importance.add_(
+                first_layer.projection_weight[unit_index, edge_index].abs()
+            )
+            primitive_index = int(
+                first_layer.hard_primitive_index[
+                    unit_index, edge_index
+                ].item()
+            )
+            if first_layer.primitives[primitive_index] == "product":
+                importance.add_(
+                    first_layer.interaction_projection_weight[
+                        unit_index, edge_index
+                    ].abs()
+                )
+        selected = torch.topk(
+            importance,
+            k=self.global_feature_top_k,
+        ).indices
+        self.hard_global_feature_mask.zero_()
+        self.hard_global_feature_mask[selected] = 1.0
+
+        shared_mask = torch.zeros_like(first_layer.hard_projection_mask)
+        shared_interaction_mask = torch.zeros_like(
+            first_layer.hard_interaction_projection_mask
+        )
+        local_top_k = min(max(int(projection_top_k), 1), len(selected))
+        for unit_index in range(first_layer.out_features):
+            if not bool(first_layer.hard_unit_mask[unit_index].item()):
+                continue
+            edge_index = int(first_layer.hard_edge_index[unit_index].item())
+            local_weights = first_layer.projection_weight[
+                unit_index, edge_index, selected
+            ].abs()
+            local_selected = selected[
+                torch.topk(local_weights, k=local_top_k).indices
+            ]
+            shared_mask[unit_index, edge_index, local_selected] = 1.0
+            primitive_index = int(
+                first_layer.hard_primitive_index[
+                    unit_index, edge_index
+                ].item()
+            )
+            if first_layer.primitives[primitive_index] == "product":
+                interaction_weights = first_layer.interaction_projection_weight[
+                    unit_index, edge_index, selected
+                ].abs()
+                interaction_selected = selected[
+                    torch.topk(interaction_weights, k=local_top_k).indices
+                ]
+                shared_interaction_mask[
+                    unit_index,
+                    edge_index,
+                    interaction_selected,
+                ] = 1.0
+        first_layer.hard_projection_mask.copy_(shared_mask)
+        first_layer.hard_interaction_projection_mask.copy_(
+            shared_interaction_mask
+        )
+
+    def selected_input_indices(self) -> list[int]:
+        if self.global_feature_top_k is not None:
+            return torch.where(self.hard_global_feature_mask.bool())[0].cpu().tolist()
+        first_layer = self.layers[0]
+        selected: set[int] = set()
+        for unit_index in range(first_layer.out_features):
+            if not bool(first_layer.hard_unit_mask[unit_index].item()):
+                continue
+            edge_index = int(first_layer.hard_edge_index[unit_index].item())
+            live = first_layer.hard_projection_mask[unit_index, edge_index].bool()
+            selected.update(torch.where(live)[0].cpu().tolist())
+            primitive_index = int(
+                first_layer.hard_primitive_index[
+                    unit_index, edge_index
+                ].item()
+            )
+            if first_layer.primitives[primitive_index] == "product":
+                interaction_live = first_layer.hard_interaction_projection_mask[
+                    unit_index, edge_index
+                ].bool()
+                selected.update(
+                    torch.where(interaction_live)[0].cpu().tolist()
+                )
+        return sorted(selected)
 
     def gate_parameters(self) -> list[nn.Parameter]:
         return [
@@ -447,11 +656,18 @@ class SymbolicKAN(nn.Module):
         ).mean()
 
     @torch.no_grad()
-    def harden(self, *, unit_threshold: float, projection_top_k: int) -> None:
+    def harden(
+        self,
+        *,
+        unit_threshold: float,
+        projection_top_k: int,
+        global_feature_top_k: int | None = None,
+    ) -> None:
         for network in self.networks:
             network.harden(
                 unit_threshold=unit_threshold,
                 projection_top_k=projection_top_k,
+                global_feature_top_k=global_feature_top_k,
             )
 
     def gate_parameters(self) -> list[nn.Parameter]:
@@ -470,7 +686,15 @@ class SymbolicKAN(nn.Module):
         ]
 
 
-def _primitive_expression(name: str, argument: str) -> str:
+def _primitive_expression(
+    name: str,
+    argument: str,
+    interaction_argument: str | None = None,
+) -> str:
+    if name == "product":
+        if interaction_argument is None:
+            raise ValueError("Product expression requires a second argument")
+        return f"({argument})*({interaction_argument})"
     return {
         "zero": "0",
         "one": "1",
@@ -539,6 +763,11 @@ def export_symbolic_kan(
             "sum",
         ],
         "edges_per_unit": model.edges_per_unit,
+        "global_feature_top_k": (
+            model.networks[0].global_feature_top_k
+            if len(model.networks) == 1
+            else [network.global_feature_top_k for network in model.networks]
+        ),
         "primitive_library": list(model.primitives),
         "input_space": (
             "raw_descriptors" if export_raw_inputs else "preprocessed_descriptors"
@@ -622,9 +851,82 @@ def export_symbolic_kan(
                     f"{float(selected['gamma']):.8g}*({projection})"
                     f"{float(selected['beta']):+.8g}"
                 )
+                interaction_inner = None
+                if str(selected["primitive"]) == "product":
+                    interaction_indices = [
+                        int(index)
+                        for index in selected["interaction_projection_indices"]
+                    ]
+                    model_interaction_weights = [
+                        float(value)
+                        for value in selected[
+                            "interaction_projection_weight"
+                        ]
+                    ]
+                    interaction_weights = list(model_interaction_weights)
+                    interaction_bias = float(
+                        selected["interaction_projection_bias"]
+                    )
+                    if layer_index == 0 and export_raw_inputs:
+                        interaction_weights = [
+                            weight * scales[source_index]
+                            for source_index, weight in zip(
+                                interaction_indices,
+                                model_interaction_weights,
+                            )
+                        ]
+                        interaction_bias += sum(
+                            weight * offsets[source_index]
+                            for source_index, weight in zip(
+                                interaction_indices,
+                                model_interaction_weights,
+                            )
+                        )
+                        exported.update(
+                            {
+                                "interaction_projection_weight": (
+                                    interaction_weights
+                                ),
+                                "interaction_projection_bias": (
+                                    interaction_bias
+                                ),
+                                "interaction_projection_input_space": (
+                                    "raw_descriptors"
+                                ),
+                                "preprocessed_interaction_projection_weight": (
+                                    model_interaction_weights
+                                ),
+                                "preprocessed_interaction_projection_bias": float(
+                                    selected[
+                                        "interaction_projection_bias"
+                                    ]
+                                ),
+                            }
+                        )
+                    interaction_terms = []
+                    for source_index, coefficient in zip(
+                        interaction_indices,
+                        interaction_weights,
+                    ):
+                        source = previous_names[int(source_index)]
+                        interaction_terms.append(
+                            f"{float(coefficient):.8g}*{source}"
+                        )
+                        if layer_index == 0:
+                            active_features.add(
+                                str(feature_names[int(source_index)])
+                            )
+                    interaction_projection = " + ".join(interaction_terms)
+                    interaction_projection += f"{interaction_bias:+.8g}"
+                    interaction_inner = (
+                        f"{float(selected['interaction_gamma']):.8g}"
+                        f"*({interaction_projection})"
+                        f"{float(selected['interaction_beta']):+.8g}"
+                    )
                 primitive = _primitive_expression(
                     str(selected["primitive"]),
                     inner,
+                    interaction_inner,
                 )
                 expression = (
                     f"{float(selected['amplitude']):.8g}*({primitive})"
@@ -697,6 +999,11 @@ def export_symbolic_kan(
             "hidden_definitions": definitions,
             "variable_definitions": variable_definitions,
             "active_feature_names": sorted(active_features),
+            "selected_global_feature_indices": network.selected_input_indices(),
+            "selected_global_feature_names": [
+                str(feature_names[index])
+                for index in network.selected_input_indices()
+            ],
             "operators": sorted(operators),
             "term_names": sorted(operators),
             "layers": layer_records,

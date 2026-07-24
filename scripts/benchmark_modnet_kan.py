@@ -430,6 +430,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--symbolic-gate-lr-scale", type=float, default=0.2)
     parser.add_argument("--symbolic-unit-threshold", type=float, default=0.5)
     parser.add_argument("--symbolic-projection-top-k", type=int, default=3)
+    parser.add_argument(
+        "--symbolic-global-feature-top-k",
+        type=int,
+        default=0,
+        help=(
+            "Select one shared top-k raw descriptor pool across the first "
+            "Symbolic-KAN layer at hardening; 0 keeps per-unit selection only."
+        ),
+    )
     parser.add_argument("--symbolic-hardening-epochs", type=int, default=100)
     parser.add_argument("--symbolic-hardening-lr", type=float, default=1e-4)
     parser.add_argument(
@@ -1399,6 +1408,11 @@ def harden_and_evaluate_symbolic_kan(
     model.harden(
         unit_threshold=args.symbolic_unit_threshold,
         projection_top_k=args.symbolic_projection_top_k,
+        global_feature_top_k=(
+            args.symbolic_global_feature_top_k
+            if args.symbolic_global_feature_top_k > 0
+            else None
+        ),
     )
     hard_optimizer = torch.optim.Adam(
         model.continuous_parameters(),
@@ -1506,6 +1520,7 @@ def harden_and_evaluate_symbolic_kan(
             "hardening_seconds": hardening_seconds,
             "unit_threshold": args.symbolic_unit_threshold,
             "projection_top_k": args.symbolic_projection_top_k,
+            "global_feature_top_k": args.symbolic_global_feature_top_k,
         }
     )
     json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -2816,6 +2831,9 @@ def run_model(
                 "symbolic_temperature_start": args.symbolic_temperature_start,
                 "symbolic_temperature_end": args.symbolic_temperature_end,
                 "symbolic_projection_top_k": args.symbolic_projection_top_k,
+                "symbolic_global_feature_top_k": (
+                    args.symbolic_global_feature_top_k
+                ),
             }
         )
     for metric_name, value in best_val_metrics.items():
@@ -4040,6 +4058,7 @@ def ordered_fieldnames(rows: list[dict[str, Any]]) -> list[str]:
         "symbolic_temperature_start",
         "symbolic_temperature_end",
         "symbolic_projection_top_k",
+        "symbolic_global_feature_top_k",
         "lr",
         "weight_decay",
         "loss",
@@ -4114,6 +4133,8 @@ def main() -> None:
         raise ValueError("--symbolic-unit-threshold must be in [0, 1]")
     if args.symbolic_projection_top_k < 1:
         raise ValueError("--symbolic-projection-top-k must be positive")
+    if args.symbolic_global_feature_top_k < 0:
+        raise ValueError("--symbolic-global-feature-top-k cannot be negative")
     if args.symbolic_hardening_epochs < 0:
         raise ValueError("--symbolic-hardening-epochs must be non-negative")
     if args.symbolify_spline_kan and "direct-spline" not in args.models:

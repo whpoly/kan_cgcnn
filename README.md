@@ -306,18 +306,23 @@ five-fold benchmark, submit:
 sbatch --export=ALL,RUN_MODE=fixed5fold,TASK_SET=small,OFFICIAL_OUTPUT_DIR=benchmarks/official-modnet-v012-small,RUN_ID=interpretable-01,ENV_NAME=modnet-kan scripts/slurm_modnet_kan_unified.sh
 ```
 
-This mode trains two independent models on the same first 32 fold-specific
-official MODNet descriptors:
+This mode trains two independent models from the fold-specific official MODNet
+descriptor ranking:
 
 - `direct-spline`: `32 -> 8 -> output`, cubic B-spline KAN, 1000 epochs.
   It reports raw KAN MAE, the exact B-spline expression, and a compact
   pykan-style edge-wise `auto_symbolic` formula with its own outer-test MAE.
-- `symbolic-kan`: the discrete gated architecture from arXiv:2603.23854,
-  `32 -> 4 -> sum`, with three candidate projections per unit and at most three
-  descriptors retained in each hardened projection. It reports relaxed/soft
-  MAE and the MAE of the hardened analytic formula. The exported formula folds
-  the fitted input scaler into its first-layer coefficients, so its variables
-  are raw descriptors; training-fold imputation values remain recorded.
+- `symbolic-kan`: the discrete gated architecture from arXiv:2603.23854 with
+  an explicit pairwise-product extension. The fixed interpretable run searches
+  128 candidate descriptors, hardens one shared five-descriptor pool, and maps
+  it through two symbolic units to the output. Each hardened projection keeps
+  at most two of the shared descriptors. The `product` primitive uses two
+  independently learned projections, so a unit can express interactions such
+  as `(a*x1+b)*(c*x2+d)` directly instead of relying on an implicit square
+  expansion. It reports relaxed/soft MAE and the MAE of the hardened analytic
+  formula. The exported formula folds the fitted input scaler into both
+  product projections, so its variables are raw descriptors; training-fold
+  imputation values remain recorded.
 
 Per-task combined results are written to
 `interpretable-kan-benchmark-<dataset>.csv/.json`. Fold formulas and stability
