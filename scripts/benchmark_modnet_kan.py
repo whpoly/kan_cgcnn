@@ -42,6 +42,7 @@ from cgcnn_pyg_kan.spline_symbolic import (
     symbolify_spline_kan,
 )
 from cgcnn_pyg_kan.symbolic_kan import (
+    DIRECT_SYMBOLIC_PRIMITIVES,
     SYMBOLIC_PRIMITIVES,
     SymbolicKAN,
     SymbolicRegularization,
@@ -410,16 +411,45 @@ def parse_args() -> argparse.Namespace:
             "training for formula fidelity calibration."
         ),
     )
-    parser.add_argument("--symbolic-hidden-dims", type=int, nargs="+", default=[4])
-    parser.add_argument("--symbolic-edges-per-unit", type=int, default=3)
+    parser.add_argument(
+        "--symbolic-hidden-dims",
+        type=int,
+        nargs="+",
+        default=[5],
+        help=(
+            "Number of direct additive symbolic terms. The direct model accepts "
+            "exactly one positive width, for example --symbolic-hidden-dims 5."
+        ),
+    )
+    parser.add_argument(
+        "--symbolic-edges-per-unit",
+        type=int,
+        default=1,
+        help="Compatibility option; direct Symbolic-KAN requires this to be 1.",
+    )
     parser.add_argument(
         "--symbolic-primitives",
         nargs="+",
         choices=SYMBOLIC_PRIMITIVES,
-        default=list(SYMBOLIC_PRIMITIVES),
+        default=list(DIRECT_SYMBOLIC_PRIMITIVES),
     )
     parser.add_argument("--symbolic-temperature-start", type=float, default=2.0)
-    parser.add_argument("--symbolic-temperature-end", type=float, default=0.1)
+    parser.add_argument("--symbolic-temperature-end", type=float, default=0.2)
+    parser.add_argument(
+        "--symbolic-hard-start",
+        type=float,
+        default=0.7,
+        help=(
+            "Training progress at which feature/operator gates switch to "
+            "straight-through hard samples."
+        ),
+    )
+    parser.add_argument(
+        "--symbolic-max-product-terms",
+        type=int,
+        default=1,
+        help="Maximum number of product terms retained in each output formula.",
+    )
     parser.add_argument("--symbolic-selection-lambda", type=float, default=1e-3)
     parser.add_argument("--symbolic-entropy-weight", type=float, default=1.0)
     parser.add_argument("--symbolic-nms-weight", type=float, default=0.1)
@@ -429,7 +459,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--symbolic-target-density", type=float, default=0.75)
     parser.add_argument("--symbolic-gate-lr-scale", type=float, default=0.2)
     parser.add_argument("--symbolic-unit-threshold", type=float, default=0.5)
-    parser.add_argument("--symbolic-projection-top-k", type=int, default=3)
+    parser.add_argument(
+        "--symbolic-projection-top-k",
+        type=int,
+        default=1,
+        help="Compatibility option; direct unary terms select exactly one feature.",
+    )
     parser.add_argument(
         "--symbolic-global-feature-top-k",
         type=int,
@@ -1057,6 +1092,8 @@ def build_model(
             primitives=args.symbolic_primitives,
             temperature_start=args.symbolic_temperature_start,
             temperature_end=args.symbolic_temperature_end,
+            hard_start=args.symbolic_hard_start,
+            max_product_terms=args.symbolic_max_product_terms,
             regularization=SymbolicRegularization(
                 selection=args.symbolic_selection_lambda,
                 entropy=args.symbolic_entropy_weight,
@@ -1395,6 +1432,7 @@ def feature_preprocessing_affine(
 def harden_and_evaluate_symbolic_kan(
     model: SymbolicKAN,
     train_loader: DataLoader,
+    val_loader: DataLoader | None,
     test_loader: DataLoader,
     prepared: dict[str, Any],
     args: argparse.Namespace,
@@ -1418,6 +1456,10 @@ def harden_and_evaluate_symbolic_kan(
         model.continuous_parameters(),
         lr=args.symbolic_hardening_lr,
     )
+    hard_best_state = None
+    hard_best_metric = float("nan")
+    hard_patience_left = args.early_stopping_patience
+    hard_metric_name = primary_val_metric(task_type)
     start = time.perf_counter()
     for epoch in range(1, args.symbolic_hardening_epochs + 1):
         loss = train_one_epoch(
@@ -1429,16 +1471,67 @@ def harden_and_evaluate_symbolic_kan(
             args.loss,
             use_symbolic_regularization=False,
         )
+        hard_val_metrics = (
+            evaluate(
+                model,
+                val_loader,
+                prepared["target_scaler"],
+                device,
+                task_type,
+                target_names=target_names,
+            )
+            if val_loader is not None
+            else None
+        )
+        hard_improved = False
+        if hard_val_metrics is not None:
+            candidate = hard_val_metrics[hard_metric_name]
+            delta = float(args.early_stopping_min_delta)
+            hard_improved = (
+                candidate > hard_best_metric + delta
+                if task_type == "classification" and np.isfinite(hard_best_metric)
+                else candidate < hard_best_metric - delta
+                if task_type != "classification" and np.isfinite(hard_best_metric)
+                else np.isfinite(candidate)
+            )
+            if hard_improved:
+                hard_best_metric = candidate
+                hard_best_state = {
+                    key: value.detach().cpu().clone()
+                    for key, value in model.state_dict().items()
+                }
+                hard_patience_left = args.early_stopping_patience
+            elif args.early_stopping_patience > 0:
+                hard_patience_left -= 1
         if args.log_every_epochs > 0 and (
             epoch == 1
             or epoch == args.symbolic_hardening_epochs
             or epoch % args.log_every_epochs == 0
         ):
+            val_text = (
+                f" val_{hard_metric_name}="
+                f"{hard_val_metrics[hard_metric_name]:.6g}"
+                if hard_val_metrics is not None
+                else ""
+            )
             print(
                 f"[symbolic-kan] hardening fine-tune "
-                f"{epoch}/{args.symbolic_hardening_epochs} loss={loss:.6g}",
+                f"{epoch}/{args.symbolic_hardening_epochs} loss={loss:.6g}"
+                f"{val_text}",
                 flush=True,
             )
+        if (
+            hard_val_metrics is not None
+            and args.early_stopping_patience > 0
+            and hard_patience_left <= 0
+        ):
+            print(
+                f"[symbolic-kan] hardening early stop at epoch {epoch}",
+                flush=True,
+            )
+            break
+    if hard_best_state is not None:
+        model.load_state_dict(hard_best_state)
     hardening_seconds = time.perf_counter() - start
 
     hard_prediction, hard_target = predict_loader(
@@ -2762,7 +2855,7 @@ def run_model(
         "architecture": getattr(model, "architecture", "unknown"),
         "block_type": "mlp" if model_label == "mlp" else "hybrid" if model_label.startswith("hybrid-") else "kan",
         "kan_impl": (
-            "symbolic-primitives"
+            "direct-symbolic-primitives"
             if model_label == "symbolic-kan"
             else kan_impl_for_family(model_label, args.kan_impl)
             if is_kan_family(model_label)
@@ -2830,6 +2923,10 @@ def run_model(
                 "symbolic_primitives": ",".join(args.symbolic_primitives),
                 "symbolic_temperature_start": args.symbolic_temperature_start,
                 "symbolic_temperature_end": args.symbolic_temperature_end,
+                "symbolic_hard_start": args.symbolic_hard_start,
+                "symbolic_max_product_terms": (
+                    args.symbolic_max_product_terms
+                ),
                 "symbolic_projection_top_k": args.symbolic_projection_top_k,
                 "symbolic_global_feature_top_k": (
                     args.symbolic_global_feature_top_k
@@ -2893,6 +2990,7 @@ def run_model(
             harden_and_evaluate_symbolic_kan(
                 model,
                 train_loader,
+                val_loader,
                 test_loader,
                 prepared,
                 args,
@@ -4057,6 +4155,8 @@ def ordered_fieldnames(rows: list[dict[str, Any]]) -> list[str]:
         "symbolic_primitives",
         "symbolic_temperature_start",
         "symbolic_temperature_end",
+        "symbolic_hard_start",
+        "symbolic_max_product_terms",
         "symbolic_projection_top_k",
         "symbolic_global_feature_top_k",
         "lr",
@@ -4116,23 +4216,33 @@ def main() -> None:
         name not in {"product", "ratio"} for name in args.simple_formula_functions
     ):
         raise ValueError("symbolic regression needs at least one unary function")
-    if not args.symbolic_hidden_dims or any(
-        value < 1 for value in args.symbolic_hidden_dims
+    if (
+        len(args.symbolic_hidden_dims) != 1
+        or args.symbolic_hidden_dims[0] < 1
     ):
-        raise ValueError("--symbolic-hidden-dims must contain positive widths")
-    if args.symbolic_edges_per_unit < 1:
-        raise ValueError("--symbolic-edges-per-unit must be positive")
+        raise ValueError(
+            "--symbolic-hidden-dims must contain exactly one positive direct "
+            "formula term count"
+        )
+    if args.symbolic_edges_per_unit != 1:
+        raise ValueError("--symbolic-edges-per-unit must be 1 for the direct model")
     if (
         args.symbolic_temperature_start <= 0
         or args.symbolic_temperature_end <= 0
     ):
         raise ValueError("Symbolic-KAN temperatures must be positive")
+    if not 0 <= args.symbolic_hard_start <= 1:
+        raise ValueError("--symbolic-hard-start must be in [0, 1]")
+    if args.symbolic_max_product_terms < 0:
+        raise ValueError("--symbolic-max-product-terms cannot be negative")
     if not 0 < args.symbolic_target_density <= 1:
         raise ValueError("--symbolic-target-density must be in (0, 1]")
     if not 0 <= args.symbolic_unit_threshold <= 1:
         raise ValueError("--symbolic-unit-threshold must be in [0, 1]")
-    if args.symbolic_projection_top_k < 1:
-        raise ValueError("--symbolic-projection-top-k must be positive")
+    if args.symbolic_projection_top_k != 1:
+        raise ValueError(
+            "--symbolic-projection-top-k must be 1 for direct symbolic terms"
+        )
     if args.symbolic_global_feature_top_k < 0:
         raise ValueError("--symbolic-global-feature-top-k cannot be negative")
     if args.symbolic_hardening_epochs < 0:

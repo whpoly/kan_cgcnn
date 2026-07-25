@@ -11,9 +11,10 @@ from cgcnn_pyg_kan.symbolic_kan import SymbolicKAN, export_symbolic_kan
 def test_symbolic_kan_defaults_to_one_direct_symbolic_layer() -> None:
     model = SymbolicKAN(6, ["target"])
 
-    assert model.hidden_dims == [4]
+    assert model.hidden_dims == [5]
     assert len(model.networks[0].layers) == 1
-    assert model.networks[0].layers[0].out_features == 4
+    assert model.networks[0].layers[0].out_features == 5
+    assert model.primitives == ("identity", "square", "tanh", "product")
 
 
 def test_symbolic_kan_export_folds_input_scaling_into_raw_formula() -> None:
@@ -26,13 +27,14 @@ def test_symbolic_kan_export_folds_input_scaling_into_raw_formula() -> None:
     )
     layer = model.networks[0].layers[0]
     with torch.no_grad():
-        layer.projection_weight[0, 0].copy_(torch.tensor([2.0, -3.0]))
-        layer.projection_bias[0, 0] = 0.4
-        layer.gamma.fill_(1.5)
-        layer.beta.fill_(-0.2)
+        layer.feature_logits[0].copy_(torch.tensor([10.0, -10.0]))
+        layer.input_scale.fill_(1.5)
+        layer.input_bias.fill_(-0.2)
         layer.amplitude.fill_(0.7)
-        layer.output_bias.fill_(0.1)
-    model.harden(unit_threshold=0.5, projection_top_k=2)
+        layer.term_bias.fill_(0.1)
+        layer.output_bias.fill_(0.3)
+        layer.unit_logits.fill_(10.0)
+    model.harden(unit_threshold=0.5, projection_top_k=1)
 
     raw = np.asarray([7.0, 20.0], dtype=np.float32)
     scales = np.asarray([0.1, 0.01], dtype=np.float32)
@@ -50,22 +52,19 @@ def test_symbolic_kan_export_folds_input_scaling_into_raw_formula() -> None:
         feature_impute_values=[6.0, 18.0],
     )
     unit = payload["targets"][0]["layers"][0]["units"][0]
-    indices = np.asarray(unit["projection_indices"], dtype=int)
     raw_projection = float(
-        np.dot(np.asarray(unit["projection_weight"]), raw[indices])
-        + unit["projection_bias"]
+        unit["raw_input_scale"] * raw[unit["feature_index"]]
+        + unit["raw_input_bias"]
     )
     raw_unit_value = (
-        unit["amplitude"]
-        * (unit["gamma"] * raw_projection + unit["beta"])
-        + unit["output_bias"]
+        unit["amplitude"] * raw_projection + unit["term_bias"]
     )
-    raw_formula_value = 2.0 * raw_unit_value + 5.0
+    raw_formula_value = 2.0 * (0.3 + raw_unit_value) + 5.0
 
     assert np.isclose(raw_formula_value, 2.0 * model_value + 5.0)
     assert payload["input_space"] == "raw_descriptors"
-    assert np.allclose(unit["projection_weight"], [0.2, -0.03])
-    assert np.isclose(unit["projection_bias"], 0.15)
+    assert np.isclose(unit["raw_input_scale"], 0.15)
+    assert np.isclose(unit["raw_input_bias"], -0.95)
     assert "raw_descriptor('density')" in text
     assert "preprocessed(" not in text
     assert "missing -> training impute value 6" in text
@@ -76,8 +75,8 @@ def test_paper_symbolic_kan_soft_hard_and_formula_export() -> None:
     model = SymbolicKAN(
         6,
         ["target_a", "target_b"],
-        hidden_dims=[4, 2],
-        edges_per_unit=3,
+        hidden_dims=[4],
+        edges_per_unit=1,
     )
     inputs = torch.randn(7, 6)
     soft = model(inputs)
@@ -88,7 +87,7 @@ def test_paper_symbolic_kan_soft_hard_and_formula_export() -> None:
     assert torch.isfinite(soft).all()
     assert any(parameter.grad is not None for parameter in model.gate_parameters())
 
-    model.harden(unit_threshold=0.5, projection_top_k=3)
+    model.harden(unit_threshold=0.5, projection_top_k=1)
     hard = model(inputs)
     payload, text = export_symbolic_kan(
         model,
@@ -97,18 +96,13 @@ def test_paper_symbolic_kan_soft_hard_and_formula_export() -> None:
 
     assert hard.shape == (7, 2)
     assert torch.isfinite(hard).all()
-    assert payload["method"] == "symbolic_kan_discrete_gated"
+    assert payload["method"] == "direct_additive_symbolic_kan"
     assert len(payload["targets"]) == 2
     assert "target = target_a" in text
     for network in model.networks:
-        for layer in network.layers:
-            selected = layer.hard_projection_mask.sum(dim=-1)
-            live = layer.hard_unit_mask.bool()
-            selected_edge = layer.hard_edge_index
-            assert torch.all(
-                selected[live, selected_edge[live]]
-                <= 3
-            )
+        assert len(network.layers) == 1
+        assert network.layer.hard
+        assert len(network.selected_input_indices()) <= 8
 
 
 def test_symbolic_kan_selects_shared_features_and_exports_products() -> None:
@@ -118,23 +112,22 @@ def test_symbolic_kan_selects_shared_features_and_exports_products() -> None:
         hidden_dims=[2],
         edges_per_unit=1,
         primitives=["product"],
+        max_product_terms=2,
     )
     layer = model.networks[0].layers[0]
     with torch.no_grad():
-        layer.projection_weight.zero_()
-        layer.interaction_projection_weight.zero_()
-        layer.projection_weight[0, 0, 0] = 5.0
-        layer.projection_weight[0, 0, 4] = 1.0
-        layer.interaction_projection_weight[0, 0, 1] = 6.0
-        layer.projection_weight[1, 0, 2] = 4.0
-        layer.interaction_projection_weight[1, 0, 3] = 7.0
-        layer.projection_bias.zero_()
-        layer.interaction_projection_bias.zero_()
-        layer.gamma.fill_(1.0)
-        layer.beta.zero_()
-        layer.interaction_gamma.fill_(1.0)
-        layer.interaction_beta.zero_()
+        layer.feature_logits.fill_(-10.0)
+        layer.interaction_feature_logits.fill_(-10.0)
+        layer.feature_logits[0, 0] = 10.0
+        layer.interaction_feature_logits[0, 1] = 10.0
+        layer.feature_logits[1, 2] = 10.0
+        layer.interaction_feature_logits[1, 3] = 10.0
+        layer.input_scale[:, 0].copy_(torch.tensor([5.0, 4.0]))
+        layer.interaction_scale[:, 0].copy_(torch.tensor([6.0, 7.0]))
+        layer.input_bias.zero_()
+        layer.interaction_bias.zero_()
         layer.amplitude.fill_(1.0)
+        layer.term_bias.zero_()
         layer.output_bias.zero_()
         layer.unit_logits.fill_(10.0)
 
@@ -155,7 +148,7 @@ def test_symbolic_kan_selects_shared_features_and_exports_products() -> None:
 
     assert np.isclose(prediction, (5.0 * 2.0) * (6.0 * 3.0) + (4.0 * 5.0) * (7.0 * 7.0))
     assert payload["global_feature_top_k"] == 5
-    assert target["selected_global_feature_indices"] == [0, 1, 2, 3, 4]
+    assert target["selected_global_feature_indices"] == [0, 1, 2, 3]
     assert target["active_feature_names"] == [
         "feature_0",
         "feature_1",
