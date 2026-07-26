@@ -29,6 +29,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from cgcnn_pyg_kan.kan import FastKANLinear, KANLinear
+from cgcnn_pyg_kan.feature_patterns import analyze_feature_patterns
 from cgcnn_pyg_kan.modnet import MODNetKAN
 from cgcnn_pyg_kan.modnet_features import MODNetFeatureProcessor, make_feature_frame
 from cgcnn_pyg_kan.pruning import (
@@ -503,6 +504,20 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Do not write MatbenchTask records even when running full official test folds.",
     )
+    parser.add_argument(
+        "--export-feature-patterns",
+        action="store_true",
+        help=(
+            "Export held-out gradient screening, permutation importance, and ALE "
+            "curves for each trained model. This is post-hoc analysis and does not "
+            "affect model selection or training."
+        ),
+    )
+    parser.add_argument("--feature-pattern-candidates", type=int, default=32)
+    parser.add_argument("--feature-pattern-top-k", type=int, default=10)
+    parser.add_argument("--feature-pattern-ale-bins", type=int, default=10)
+    parser.add_argument("--feature-pattern-permutation-repeats", type=int, default=1)
+    parser.add_argument("--feature-pattern-max-samples", type=int, default=4096)
     return parser.parse_args()
 
 
@@ -1807,6 +1822,73 @@ def predict_features(
     return np.concatenate(predictions, axis=0)
 
 
+def export_feature_patterns(
+    model: torch.nn.Module,
+    prepared: dict[str, Any],
+    args: argparse.Namespace,
+    device: torch.device,
+    task_type: str,
+    target_names: list[str],
+    model_label: str,
+    fold: int,
+) -> dict[str, Any]:
+    if len(prepared["x_test"]) < 2:
+        raise ValueError(
+            "Feature-pattern export requires an outer held-out fold with at least two samples"
+        )
+    feature_scales, feature_offsets, _ = feature_preprocessing_affine(prepared)
+    payload = analyze_feature_patterns(
+        model,
+        prepared["x_test"],
+        prepared["y_test"],
+        prepared["selected_features"],
+        target_names,
+        device,
+        task_type,
+        prepared["target_scaler"].mean,
+        prepared["target_scaler"].std,
+        feature_scales,
+        feature_offsets,
+        batch_size=args.batch_size,
+        candidate_count=args.feature_pattern_candidates,
+        top_k=args.feature_pattern_top_k,
+        ale_bins=args.feature_pattern_ale_bins,
+        permutation_repeats=args.feature_pattern_permutation_repeats,
+        max_samples=args.feature_pattern_max_samples,
+        seed=args.seed + 1009 * fold,
+    )
+    payload.update(
+        {
+            "dataset": args.dataset,
+            "fold": fold,
+            "model": model_label,
+            "evaluation_split": "outer_test",
+            "selection_note": (
+                "Post-hoc only: outer-test patterns were not used for training, "
+                "hyperparameter selection, or performance-gate decisions."
+            ),
+        }
+    )
+    path = (
+        Path(args.output_dir)
+        / f"feature-patterns-{args.dataset}-fold{fold}-{model_label}.json"
+    )
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    selected = [
+        str(record["feature"])
+        for record in payload["features"]
+        if record["selected_for_ale"]
+    ]
+    return {
+        "feature_pattern_path": str(path),
+        "feature_pattern_metric": str(payload["metric"]),
+        "feature_pattern_baseline_metric": float(payload["baseline_metric"]),
+        "feature_pattern_top_features": ",".join(selected),
+        "feature_pattern_candidate_count": int(payload["candidate_count"]),
+        "feature_pattern_top_k": int(payload["top_k"]),
+    }
+
+
 def _polynomial_library(
     values: np.ndarray,
     variable_names: list[str],
@@ -3015,6 +3097,19 @@ def run_model(
                 int(fold_data["metadata"]["fold"]),
             )
         )
+    if args.export_feature_patterns:
+        row.update(
+            export_feature_patterns(
+                model,
+                prepared,
+                args,
+                device,
+                task_type,
+                target_names,
+                model_label,
+                int(fold_data["metadata"]["fold"]),
+            )
+        )
     if len(test_prediction) == 0:
         predictions = []
     else:
@@ -4139,6 +4234,12 @@ def ordered_fieldnames(rows: list[dict[str, Any]]) -> list[str]:
         "simple_formula_test_target_mae",
         "simple_formula_test_fidelity_r2_pct",
         "simple_formula_calibration_size",
+        "feature_pattern_path",
+        "feature_pattern_metric",
+        "feature_pattern_baseline_metric",
+        "feature_pattern_top_features",
+        "feature_pattern_candidate_count",
+        "feature_pattern_top_k",
         "params",
         "effective_params",
         "pruned_params",
@@ -4208,6 +4309,19 @@ def main() -> None:
         raise ValueError("--inner-fold-index requires --val-ratio > 0")
     if args.distill_simple_formula and args.skip_test_eval:
         raise ValueError("Simple formula distillation requires outer test evaluation")
+    if args.export_feature_patterns and args.skip_test_eval:
+        raise ValueError("Feature-pattern export requires outer test evaluation")
+    if (
+        args.feature_pattern_candidates < 1
+        or args.feature_pattern_top_k < 1
+        or args.feature_pattern_ale_bins < 2
+        or args.feature_pattern_permutation_repeats < 1
+        or args.feature_pattern_max_samples < 2
+    ):
+        raise ValueError(
+            "Feature-pattern limits require positive candidates/top-k/repeats, "
+            "at least two ALE bins, and at least two samples"
+        )
     if args.simple_formula_max_terms < 1:
         raise ValueError("--simple-formula-max-terms must be positive")
     if args.simple_formula_epsilon <= 0 or args.simple_formula_exp_clip <= 0:

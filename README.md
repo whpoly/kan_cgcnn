@@ -303,27 +303,46 @@ To reuse completed official folds and run only the fixed interpretable
 five-fold benchmark, submit:
 
 ```bash
-sbatch --export=ALL,RUN_MODE=fixed5fold,TASK_SET=small,OFFICIAL_OUTPUT_DIR=benchmarks/official-modnet-v012-small,RUN_ID=interpretable-01,ENV_NAME=modnet-kan scripts/slurm_modnet_kan_unified.sh
+sbatch --export=ALL,RUN_MODE=fixed5fold,TASK_SET=small,RUN_ID=direct-symbolic-small-20260725,OFFICIAL_OUTPUT_DIR=benchmarks/official-modnet-v012-all-oneenv-20260708-120451,ENV_NAME=modnet-kan scripts/slurm_modnet_kan_unified.sh
 ```
 
-This mode trains only the direct additive `symbolic-kan` model from the
-fold-specific official MODNet descriptor ranking. The default run searches 12
-candidate descriptors and learns five independent, non-compositional terms:
+This mode is performance-first. It trains compact all-KAN `fastkan` and
+`spline` teachers on exactly the same fold-specific official MODNet descriptor
+prefix, preprocessing, validation split, and early-stopping rule. Each frozen
+teacher is compared with the completed official MODNet fold result. The default
+performance-closeness gate allows at most 5% mean relative MAE degradation.
 
-```text
-target = bias + sum_k amplitude_k * primitive_k(a_k * x_feature_k + b_k)
-```
+Interpretation is post-hoc and never changes training or model selection. On
+each outer held-out fold it:
 
-Each unary term hard-selects exactly one descriptor. At most one term may be a
-pairwise product, and the complete formula uses at most five distinct
-descriptors. The default primitive library is intentionally small:
-`identity`, `square`, `tanh`, and `product`. Feature and operator gates become
-straight-through hard samples late in training; the selected formula is then
-refit with validation early stopping. The exported raw-descriptor formula and
-the hardened model use exactly the same forward computation.
+- screens all inputs by mean absolute input gradient;
+- evaluates held-out permutation importance for the top 32 candidates;
+- exports 10-bin accumulated-local-effects (ALE) curves for the top 10;
+- finds descriptor patterns selected in at least four of five folds by both
+  FastKAN and Spline-KAN;
+- requires cross-model ALE correlation of at least 0.6 and requires both
+  teachers to pass the performance-closeness gate.
+- turns every accepted response pattern into a reusable derived descriptor in
+  raw descriptor units. It searches simple transforms such as square, cube,
+  tanh, protected log/square-root/reciprocal, absolute value, arctangent, and
+  Gaussian. If no simple transform reaches the default pattern-fit
+  `R2 >= 0.8`, it exports the consensus ALE knots as an exact piecewise-linear
+  descriptor instead of forcing a misleading formula.
 
-Fold formulas are written under the `symbolic-kan` directory and the
-five-fold comparison and stability report under `compare-symbolic-kan`.
+Per-fold artifacts are written under `<task>/teachers`. Official comparisons
+are under `<task>/compare-fastkan` and `<task>/compare-spline`. The final
+machine-readable CSV/JSON and readable report are under
+`<task>/feature-consensus`, together with one PNG comparing the mean
+FastKAN/Spline-KAN ALE curve and its cross-fold spread for every accepted
+consensus pattern. Reusable formulas or piecewise-linear knot definitions are
+also written to `derived-features-<task>.csv/.json`. Important overrides include
+`FIXED_FEATURE_PATTERN_CANDIDATES`, `FIXED_FEATURE_PATTERN_TOP_K`,
+`FIXED_FEATURE_PATTERN_ALE_BINS`, `FIXED_FEATURE_MIN_FOLD_FREQUENCY`, and
+`FIXED_FEATURE_MIN_CURVE_CORRELATION`. A consensus feature must also have
+positive mean held-out permutation importance in both model families; override
+the threshold with `FIXED_FEATURE_MIN_PERMUTATION_IMPORTANCE`. Derived-feature
+search is controlled by `FIXED_DERIVED_FEATURE_FUNCTIONS` and
+`FIXED_DERIVED_FEATURE_MIN_R2`.
 
 This mirrors the MODNet v0.1.12 Matbench setup: `DeBreuck2020Featurizer` for
 structure tasks, `CompositionOnlyFeaturizer` for composition tasks,

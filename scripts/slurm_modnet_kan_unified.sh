@@ -41,9 +41,20 @@ FIXED_KAN_GROUP_DIMS="${FIXED_KAN_GROUP_DIMS:-6}"
 FIXED_KAN_PROPERTY_DIMS="${FIXED_KAN_PROPERTY_DIMS:-3}"
 FIXED_KAN_TARGET_DIMS="${FIXED_KAN_TARGET_DIMS:-}"
 FIXED_KAN_GRID_SIZE="${FIXED_KAN_GRID_SIZE:-5}"
+FIXED_KAN_SPLINE_ORDER="${FIXED_KAN_SPLINE_ORDER:-3}"
 FIXED_KAN_L1_LAMBDA="${FIXED_KAN_L1_LAMBDA:-0}"
 FIXED_FEATURE_SCALER="${FIXED_FEATURE_SCALER:-minmax}"
 FIXED_TARGET_SCALE="${FIXED_TARGET_SCALE:-standard}"
+FIXED_FEATURE_PATTERN_CANDIDATES="${FIXED_FEATURE_PATTERN_CANDIDATES:-32}"
+FIXED_FEATURE_PATTERN_TOP_K="${FIXED_FEATURE_PATTERN_TOP_K:-10}"
+FIXED_FEATURE_PATTERN_ALE_BINS="${FIXED_FEATURE_PATTERN_ALE_BINS:-10}"
+FIXED_FEATURE_PATTERN_PERMUTATION_REPEATS="${FIXED_FEATURE_PATTERN_PERMUTATION_REPEATS:-1}"
+FIXED_FEATURE_PATTERN_MAX_SAMPLES="${FIXED_FEATURE_PATTERN_MAX_SAMPLES:-4096}"
+FIXED_FEATURE_MIN_FOLD_FREQUENCY="${FIXED_FEATURE_MIN_FOLD_FREQUENCY:-4}"
+FIXED_FEATURE_MIN_CURVE_CORRELATION="${FIXED_FEATURE_MIN_CURVE_CORRELATION:-0.6}"
+FIXED_FEATURE_MIN_PERMUTATION_IMPORTANCE="${FIXED_FEATURE_MIN_PERMUTATION_IMPORTANCE:-0}"
+FIXED_DERIVED_FEATURE_FUNCTIONS="${FIXED_DERIVED_FEATURE_FUNCTIONS:-identity square cube tanh log sqrt reciprocal abs arctan gaussian}"
+FIXED_DERIVED_FEATURE_MIN_R2="${FIXED_DERIVED_FEATURE_MIN_R2:-0.8}"
 
 ALL_TASKS=(
   matbench_dielectric
@@ -101,25 +112,28 @@ if [[ "$RUN_MODE" == "fixed5fold" ]]; then
     echo "RUN_MODE=fixed5fold requires OFFICIAL_OUTPUT_DIR to point to completed official results." >&2
     exit 2
   fi
-  KAN_OUTPUT_ROOT="${KAN_OUTPUT_ROOT:-benchmarks/compact-full-fastkan-5fold-${RUN_ID}}"
+  KAN_OUTPUT_ROOT="${KAN_OUTPUT_ROOT:-benchmarks/fastkan-spline-feature-patterns-5fold-${RUN_ID}}"
   read -r -a FIXED_KAN_COMMON_DIM_ARRAY <<< "$FIXED_KAN_COMMON_DIMS"
   read -r -a FIXED_KAN_GROUP_DIM_ARRAY <<< "$FIXED_KAN_GROUP_DIMS"
   read -r -a FIXED_KAN_PROPERTY_DIM_ARRAY <<< "$FIXED_KAN_PROPERTY_DIMS"
   read -r -a FIXED_KAN_TARGET_DIM_ARRAY <<< "$FIXED_KAN_TARGET_DIMS"
+  read -r -a FIXED_DERIVED_FEATURE_FUNCTION_ARRAY <<< "$FIXED_DERIVED_FEATURE_FUNCTIONS"
 
   echo "Run mode: fixed5fold"
   echo "Tasks: ${TASKS[*]}"
   echo "Official results: ${OFFICIAL_OUTPUT_DIR}"
-  echo "Compact full FastKAN outputs: ${KAN_OUTPUT_ROOT}"
+  echo "FastKAN/Spline-KAN feature-pattern outputs: ${KAN_OUTPUT_ROOT}"
   echo "Architecture: ${FIXED_KAN_N_FEATURES} descriptors -> common KAN [${FIXED_KAN_COMMON_DIMS}] -> group KAN [${FIXED_KAN_GROUP_DIMS}] -> property KAN [${FIXED_KAN_PROPERTY_DIMS}] -> target KAN [${FIXED_KAN_TARGET_DIMS:-identity}] -> KAN output"
-  echo "FastKAN RBF grid size: ${FIXED_KAN_GRID_SIZE}"
+  echo "KAN grid size: ${FIXED_KAN_GRID_SIZE}; Spline-KAN order: ${FIXED_KAN_SPLINE_ORDER}"
   echo "Fit rule: validation early stopping with best-state restore"
+  echo "Interpretation: gradient screen ${FIXED_FEATURE_PATTERN_CANDIDATES} -> permutation/ALE top ${FIXED_FEATURE_PATTERN_TOP_K}; consensus >=${FIXED_FEATURE_MIN_FOLD_FREQUENCY}/5 folds, positive importance, and curve r>=${FIXED_FEATURE_MIN_CURVE_CORRELATION}"
+  echo "Derived descriptors: fit [${FIXED_DERIVED_FEATURE_FUNCTIONS}] to consensus raw-descriptor ALE; symbolic R2 gate=${FIXED_DERIVED_FEATURE_MIN_R2}, otherwise export exact piecewise-linear ALE feature"
 
   for task in "${TASKS[@]}"; do
     feature_dir="${OFFICIAL_OUTPUT_DIR}/${task}/official_feature_folds"
     official_fold_csv="${OFFICIAL_OUTPUT_DIR}/${task}/official-modnet-fold-results-${task}.csv"
     out_dir="${KAN_OUTPUT_ROOT}/${task}"
-    fastkan_dir="${out_dir}/fastkan"
+    teacher_dir="${out_dir}/teachers"
     task_target_scale="$FIXED_TARGET_SCALE"
     if [[ "$task" == "matbench_glass" || "$task" == "matbench_mp_is_metal" ]]; then
       task_target_scale="none"
@@ -136,14 +150,14 @@ if [[ "$RUN_MODE" == "fixed5fold" ]]; then
         exit 1
       fi
     done
-    mkdir -p "$fastkan_dir" "$out_dir/compare-fastkan"
+    mkdir -p "$teacher_dir" "$out_dir/compare-fastkan" "$out_dir/compare-spline" "$out_dir/feature-consensus"
 
     conda run --no-capture-output -n "$ENV_NAME" \
       python -u scripts/benchmark_modnet_kan.py \
       --dataset "$task" \
       --precomputed-feature-dir "$feature_dir" \
       --folds 0 1 2 3 4 \
-      --models fastkan \
+      --models fastkan spline \
       --n-features "$FIXED_KAN_N_FEATURES" \
       --kan-common-dims "${FIXED_KAN_COMMON_DIM_ARRAY[@]}" \
       --kan-group-dims "${FIXED_KAN_GROUP_DIM_ARRAY[@]}" \
@@ -151,6 +165,7 @@ if [[ "$RUN_MODE" == "fixed5fold" ]]; then
       --kan-target-dims "${FIXED_KAN_TARGET_DIM_ARRAY[@]}" \
       --kan-impl fastkan \
       --kan-grid-size "$FIXED_KAN_GRID_SIZE" \
+      --kan-spline-order "$FIXED_KAN_SPLINE_ORDER" \
       --kan-layernorm \
       --kan-l1-lambda "$FIXED_KAN_L1_LAMBDA" \
       --kan-sparsity-mode edge-group \
@@ -173,13 +188,19 @@ if [[ "$RUN_MODE" == "fixed5fold" ]]; then
       --forward-iters 5 \
       --warmup-iters 1 \
       --log-every-epochs 20 \
-      --output-dir "$fastkan_dir"
+      --export-feature-patterns \
+      --feature-pattern-candidates "$FIXED_FEATURE_PATTERN_CANDIDATES" \
+      --feature-pattern-top-k "$FIXED_FEATURE_PATTERN_TOP_K" \
+      --feature-pattern-ale-bins "$FIXED_FEATURE_PATTERN_ALE_BINS" \
+      --feature-pattern-permutation-repeats "$FIXED_FEATURE_PATTERN_PERMUTATION_REPEATS" \
+      --feature-pattern-max-samples "$FIXED_FEATURE_PATTERN_MAX_SAMPLES" \
+      --output-dir "$teacher_dir"
 
     conda run --no-capture-output -n "$ENV_NAME" \
       python -u scripts/compare_official_modnet_kan.py \
       --dataset "$task" \
       --official-fold-csv "$official_fold_csv" \
-      --kan-output-dir "$fastkan_dir" \
+      --kan-output-dir "$teacher_dir" \
       --model fastkan \
       --comparison-target teacher \
       --expected-folds 5 \
@@ -188,11 +209,41 @@ if [[ "$RUN_MODE" == "fixed5fold" ]]; then
       --max-improvement-std "$FIXED_MAX_IMPROVEMENT_STD" \
       --max-teacher-relative-degradation "$FIXED_MAX_TEACHER_DEGRADATION" \
       --output-dir "$out_dir/compare-fastkan"
+
+    conda run --no-capture-output -n "$ENV_NAME" \
+      python -u scripts/compare_official_modnet_kan.py \
+      --dataset "$task" \
+      --official-fold-csv "$official_fold_csv" \
+      --kan-output-dir "$teacher_dir" \
+      --model spline \
+      --comparison-target teacher \
+      --expected-folds 5 \
+      --min-relative-improvement "$FIXED_MIN_RELATIVE_IMPROVEMENT" \
+      --min-fold-wins "$FIXED_MIN_FOLD_WINS" \
+      --max-improvement-std "$FIXED_MAX_IMPROVEMENT_STD" \
+      --max-teacher-relative-degradation "$FIXED_MAX_TEACHER_DEGRADATION" \
+      --output-dir "$out_dir/compare-spline"
+
+    conda run --no-capture-output -n "$ENV_NAME" \
+      python -u scripts/summarize_kan_feature_patterns.py \
+      --dataset "$task" \
+      --pattern-dir "$teacher_dir" \
+      --models fastkan spline \
+      --comparison-jsons \
+        "$out_dir/compare-fastkan/fixed5fold-comparison-${task}.json" \
+        "$out_dir/compare-spline/fixed5fold-comparison-${task}.json" \
+      --expected-folds 5 \
+      --min-fold-frequency "$FIXED_FEATURE_MIN_FOLD_FREQUENCY" \
+      --min-curve-correlation "$FIXED_FEATURE_MIN_CURVE_CORRELATION" \
+      --min-permutation-importance "$FIXED_FEATURE_MIN_PERMUTATION_IMPORTANCE" \
+      --derived-feature-functions "${FIXED_DERIVED_FEATURE_FUNCTION_ARRAY[@]}" \
+      --derived-feature-min-r2 "$FIXED_DERIVED_FEATURE_MIN_R2" \
+      --output-dir "$out_dir/feature-consensus"
   done
 
   echo "Unified conda env: ${ENV_NAME}"
   echo "Reused official MODNet outputs: ${OFFICIAL_OUTPUT_DIR}"
-  echo "Compact full FastKAN five-fold outputs: ${KAN_OUTPUT_ROOT}"
+  echo "FastKAN/Spline-KAN five-fold feature-pattern outputs: ${KAN_OUTPUT_ROOT}"
   exit 0
 fi
 
