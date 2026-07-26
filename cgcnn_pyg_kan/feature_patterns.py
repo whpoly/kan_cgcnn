@@ -364,12 +364,14 @@ def analyze_feature_patterns(
             record["ale"][str(target_name)] = {
                 "shape": _shape_label(effects),
                 "points": [
-                    {
-                        key: value
-                        for key, value in point.items()
-                        if key != "effects"
-                    }
-                    | {"effect": effects[point_index]}
+                    dict(
+                        {
+                            key: value
+                            for key, value in point.items()
+                            if key != "effects"
+                        },
+                        effect=effects[point_index],
+                    )
                     for point_index, point in enumerate(curve)
                 ],
             }
