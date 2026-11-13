@@ -1,0 +1,8 @@
+{
+  "fits": 1000,
+  "scope": "fold artifact consistency",
+  "fold": 4,
+  "mae": 0.287176969161215,
+  "passed": true,
+  "n": 952
+}

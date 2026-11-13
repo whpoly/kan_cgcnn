@@ -46,7 +46,8 @@ $allTasks = @(
     "matbench_mp_is_metal",
     "matbench_perovskites",
     "matbench_phonons",
-    "matbench_steels"
+    "matbench_steels",
+    "matbench_expt_is_metal"
 )
 
 $smallTasks = @(
@@ -57,7 +58,8 @@ $smallTasks = @(
     "matbench_elastic",
     "matbench_perovskites",
     "matbench_phonons",
-    "matbench_steels"
+    "matbench_steels",
+    "matbench_expt_is_metal"
 )
 
 if ($Tasks.Count -eq 0) {

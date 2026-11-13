@@ -1,0 +1,33 @@
+{
+  "checked_at": "2026-11-10T04:24:05.4173017+08:00",
+  "benchmark_status": {
+    "state": "feature_cross_nmi",
+    "pid": 17012,
+    "task": "matbench_dielectric",
+    "updated_at": "2026-11-10T04:21:03.944849+08:00",
+    "wall_seconds": 654633.1089999999,
+    "bank": "mm_mv",
+    "fold": 0,
+    "completed": 485,
+    "total": 3652
+  },
+  "previous_checked_at": "2026-11-10T03:27:31.2877237+08:00",
+  "steel_status": {
+    "state": "genetic_search",
+    "pid": 24796,
+    "updated_at": "2026-11-10T01:54:11.745509+08:00",
+    "fold": 2,
+    "stage": "native",
+    "progress": "C:\\Users\\User\\Desktop\\kan_cgcnn\\benchmarks\\steel396-shap-pair-20261108\\formal\\fold-2\\native\\progress.json"
+  },
+  "new_fits_since_previous": 0,
+  "stage_counts": {
+    "native": 7785,
+    "mass50": 8000,
+    "top50": 6750
+  },
+  "steel_cpu_active": true,
+  "benchmark_workers_cpu_active": true,
+  "steel_new_fits": 1003.0,
+  "steel_total_formal_fits": 22535.0
+}

@@ -14,6 +14,9 @@ import time
 from pathlib import Path
 from typing import Any
 
+from modnet_runtime import configure_official_runtime
+configure_official_runtime()
+
 # Set native-library limits before NumPy, TensorFlow, matminer, or MODNet are
 # imported. Setting these after importing TensorFlow is too late and can cause
 # severe oversubscription in nested Matbench/feature-selection jobs.
@@ -51,6 +54,7 @@ MATBENCH_TASKS = [
     "matbench_perovskites",
     "matbench_phonons",
     "matbench_steels",
+    "matbench_expt_is_metal",
 ]
 SMALL_MATBENCH_TASKS = [
     "matbench_dielectric",
@@ -61,6 +65,7 @@ SMALL_MATBENCH_TASKS = [
     "matbench_perovskites",
     "matbench_phonons",
     "matbench_steels",
+    "matbench_expt_is_metal",
 ]
 CLASSIFICATION_TASKS = {
     "matbench_expt_is_metal",
@@ -302,6 +307,12 @@ def load_or_featurize(
     else:
         raise RuntimeError(f"{task} has neither structure nor composition column")
 
+    # Some matminer featurizers use featurize_many during fit(), before MODNet
+    # sets MultipleFeaturizer's worker count. Limit those child fits as well.
+    for group in ("composition_featurizers", "oxid_composition_featurizers",
+                  "structure_featurizers", "site_featurizers"):
+        for component in getattr(featurizer, group, ()):
+            component.set_n_jobs(n_jobs)
     data = MODData(
         materials=materials,
         targets=targets.values,
@@ -309,7 +320,15 @@ def load_or_featurize(
         num_classes=num_classes,
         featurizer=featurizer,
     )
-    data.featurize(n_jobs=n_jobs)
+    # MODNet 0.1.12 creates SiteStatsFingerprint wrappers without forwarding
+    # n_jobs. Limit their default as well, without changing feature values.
+    import matminer.featurizers.base as matminer_base
+    original_cpu_count = matminer_base.cpu_count
+    matminer_base.cpu_count = lambda: n_jobs
+    try:
+        data.featurize(n_jobs=n_jobs)
+    finally:
+        matminer_base.cpu_count = original_cpu_count
     data.save(cache_path)
     return data, {
         "task": task,

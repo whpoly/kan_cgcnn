@@ -2,7 +2,7 @@
 #SBATCH --job-name=modnet_kan
 #SBATCH --output=slurm-%x-%A_%a.out
 #SBATCH --error=slurm-%x-%A_%a.err
-#SBATCH --array=0-10%4
+#SBATCH --array=0-11%4
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
@@ -24,6 +24,7 @@ TASKS=(
   matbench_perovskites
   matbench_phonons
   matbench_steels
+  matbench_expt_is_metal
 )
 
 TASK_INDEX="${SLURM_ARRAY_TASK_ID:?This script must be submitted as a Slurm array}"
@@ -81,8 +82,8 @@ conda run --no-capture-output -n "$KAN_ENV" \
     --num-random-trials "$NUM_RANDOM_TRIALS" \
     --max-trials-per-family "$NUM_RANDOM_TRIALS" \
     --metric auto \
-    --tune-epochs 80 \
-    --final-epochs 300 \
+    --tune-epochs 1000 \
+    --final-epochs 1000 \
     --batch-size 64 \
     --val-ratio 0.1 \
     --early-stopping-patience 60 \

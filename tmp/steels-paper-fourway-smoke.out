@@ -1,0 +1,44 @@
+2026-11-06 21:24:06,286 - modnet - INFO - Loaded <modnet.preprocessing.MODData object at 0x000001795ECEECD0> object, created with modnet version 0.1.12
+2026-11-06 21:24:06,426 - modnet - INFO - Targets:
+2026-11-06 21:24:06,426 - modnet - INFO - 1)target: regression
+2026-11-06 21:24:10,053 - modnet - INFO - Generation number 0
+GA generation 0: 1/4; candidate=0, inner=0, MAE=1441.3, epochs=1, seconds=1.4
+GA generation 0: 2/4; candidate=0, inner=1, MAE=1387.1, epochs=1, seconds=1.0
+GA generation 0: 3/4; candidate=1, inner=0, MAE=1319.8, epochs=1, seconds=1.0
+GA generation 0: 4/4; candidate=1, inner=1, MAE=1359.1, epochs=1, seconds=1.0
+2026-11-06 21:24:32,088 - modnet - INFO - Generation number 1
+GA generation 1: 1/4; candidate=0, inner=0, MAE=1441.6, epochs=1, seconds=1.0
+GA generation 1: 2/4; candidate=0, inner=1, MAE=1387.1, epochs=1, seconds=1.0
+GA generation 1: 3/4; candidate=1, inner=0, MAE=1408.2, epochs=1, seconds=0.9
+GA generation 1: 4/4; candidate=1, inner=1, MAE=1311.5, epochs=1, seconds=1.0
+mm_modnet 0 passed
+2026-11-06 21:24:43,758 - modnet - INFO - Targets:
+2026-11-06 21:24:43,758 - modnet - INFO - 1)target: regression
+2026-11-06 21:24:43,776 - modnet - INFO - Generation number 0
+GA generation 0: 1/4; candidate=0, inner=0, MAE=259, epochs=1, seconds=4.1
+GA generation 0: 2/4; candidate=0, inner=1, MAE=449.51, epochs=1, seconds=3.2
+GA generation 0: 3/4; candidate=1, inner=0, MAE=1282.4, epochs=1, seconds=3.2
+GA generation 0: 4/4; candidate=1, inner=1, MAE=949.41, epochs=1, seconds=3.2
+2026-11-06 21:25:15,401 - modnet - INFO - Generation number 1
+GA generation 1: 1/4; candidate=0, inner=0, MAE=222.57, epochs=1, seconds=3.3
+GA generation 1: 2/4; candidate=0, inner=1, MAE=574.34, epochs=1, seconds=3.3
+GA generation 1: 3/4; candidate=1, inner=0, MAE=467.11, epochs=1, seconds=3.3
+GA generation 1: 4/4; candidate=1, inner=1, MAE=342.29, epochs=1, seconds=3.3
+mm_kan 0 passed
+mm_modnet 0 passed
+modnet 0 passed
+2026-11-06 21:25:46,439 - modnet - INFO - Targets:
+2026-11-06 21:25:46,440 - modnet - INFO - 1)target: regression
+2026-11-06 21:25:46,499 - modnet - INFO - Generation number 0
+GA generation 0: 1/4; candidate=0, inner=0, MAE=487.72, epochs=1, seconds=4.0
+GA generation 0: 2/4; candidate=0, inner=1, MAE=428.97, epochs=1, seconds=3.2
+GA generation 0: 3/4; candidate=1, inner=0, MAE=1315.2, epochs=1, seconds=3.3
+GA generation 0: 4/4; candidate=1, inner=1, MAE=1481.2, epochs=1, seconds=3.2
+2026-11-06 21:26:17,959 - modnet - INFO - Generation number 1
+GA generation 1: 1/4; candidate=0, inner=0, MAE=315.79, epochs=1, seconds=3.2
+GA generation 1: 2/4; candidate=0, inner=1, MAE=438.27, epochs=1, seconds=3.2
+GA generation 1: 3/4; candidate=1, inner=0, MAE=423.81, epochs=1, seconds=3.3
+GA generation 1: 4/4; candidate=1, inner=1, MAE=686.28, epochs=1, seconds=3.2
+mm_kan 0 passed
+mm_modnet 0 passed
+mm_mv_kan 0 passed

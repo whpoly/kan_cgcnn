@@ -1,0 +1,56 @@
+{
+  "reason": "User requested pausing paper reproduction and resuming prior benchmark",
+  "changed_at": "2026-11-06T19:40:58.1950503+08:00",
+  "paper_paused": [
+    {
+      "creation_date": "2026-11-05T10:59:39.512351+08:00",
+      "pid": 32676,
+      "command_line": "\"C:\\Users\\User\\.conda\\envs\\modnet-v013-mattervial\\python.exe\" -u scripts/steels_shap_reconstruction_v3.py formal"
+    }
+  ],
+  "benchmark_resumed": [
+    {
+      "pid": 23400,
+      "creation_date": "2026-11-02T14:30:14.479441+08:00",
+      "command_line": "\"C:\\Users\\User\\.conda\\envs\\modnet-v012-matbench\\python.exe\" -u scripts/queue_matbench_expansion.py",
+      "state": "resumed"
+    },
+    {
+      "pid": 22372,
+      "creation_date": "2026-11-02T14:30:23.659825+08:00",
+      "command_line": "\"C:\\Users\\User\\.conda\\envs\\modnet-v012-matbench\\python.exe\" -u scripts/queue_additional_regressions_v3.py",
+      "state": "resumed"
+    },
+    {
+      "pid": 12444,
+      "creation_date": "2026-11-03T17:00:19.324435+08:00",
+      "command_line": "\"C:\\Users\\User\\.conda\\envs\\modnet-v012-matbench\\python.exe\" -u scripts/queue_native_classification_v4.py",
+      "state": "resumed"
+    },
+    {
+      "pid": 17012,
+      "creation_date": "2026-11-02T14:30:14.605952+08:00",
+      "command_line": "C:\\Users\\User\\.conda\\envs\\modnet-v012-matbench\\python.exe -u C:\\Users\\User\\Desktop\\kan_cgcnn\\scripts\\run_native_matbench_expansion.py --task matbench_dielectric --csv C:\\Users\\User\\Desktop\\kan_cgcnn\\benchmarks\\matbench-expansion-20261101\\source\\matbench_dielectric_featurizedMM2020Struct_mattervial.csv --output C:\\Users\\User\\Desktop\\kan_cgcnn\\benchmarks\\matbench-expansion-20261101\\matbench_dielectric --n-jobs 3",
+      "state": "resumed"
+    },
+    {
+      "pid": 32080,
+      "creation_date": "2026-11-05T00:24:09.025322+08:00",
+      "command_line": "\"C:\\Users\\User\\.conda\\envs\\modnet-v012-matbench\\python.exe\" \"-c\" \"from multiprocessing.spawn import spawn_main; spawn_main(parent_pid=17012, pipe_handle=4828)\" \"--multiprocessing-fork\"",
+      "state": "resumed"
+    },
+    {
+      "pid": 14656,
+      "creation_date": "2026-11-05T00:24:09.036722+08:00",
+      "command_line": "\"C:\\Users\\User\\.conda\\envs\\modnet-v012-matbench\\python.exe\" \"-c\" \"from multiprocessing.spawn import spawn_main; spawn_main(parent_pid=17012, pipe_handle=500)\" \"--multiprocessing-fork\"",
+      "state": "resumed"
+    },
+    {
+      "pid": 31988,
+      "creation_date": "2026-11-05T00:24:09.04335+08:00",
+      "command_line": "\"C:\\Users\\User\\.conda\\envs\\modnet-v012-matbench\\python.exe\" \"-c\" \"from multiprocessing.spawn import spawn_main; spawn_main(parent_pid=17012, pipe_handle=4864)\" \"--multiprocessing-fork\"",
+      "state": "resumed"
+    }
+  ],
+  "paper_resumed_for_fourway_at": "2026-11-06T21:26:54.2520625+08:00"
+}

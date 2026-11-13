@@ -1,0 +1,805 @@
+{
+  "MatterVial_SupportData-tree": {
+    "sha": "ccc65ab78daad3553468d393d4427936a0540b9f",
+    "truncated": false,
+    "paths": [
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_no_orb/pca_plot_shap_features_annotated_size.png",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_no_orb/pca_plot_shap_features_annotated_size.svg",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_no_orb/pca_plot_shap_features_size.png",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_no_orb/pca_plot_shap_features_size.svg",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_no_orb/shap_beeswarm_cluster_formulas_full_fold_0_loaded.svg",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_no_orb/shap_beeswarm_cluster_formulas_none_fold_0_loaded.svg",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_no_orb/shap_beeswarm_cluster_formulas_short_fold_0_loaded.svg",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_no_orb/shap_beeswarm_formulas_full_fold_0_loaded.svg",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_no_orb/shap_beeswarm_formulas_full_fold_0_loaded_per_class.svg",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_no_orb/shap_beeswarm_formulas_full_fold_0_loaded_top10_overall.svg",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_no_orb/shap_beeswarm_formulas_none_fold_0_loaded.svg",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_no_orb/shap_beeswarm_formulas_none_fold_0_loaded_per_class.svg",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_no_orb/shap_beeswarm_formulas_none_fold_0_loaded_top10_overall.svg",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_no_orb/shap_beeswarm_formulas_short_fold_0_loaded.svg",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_no_orb/shap_beeswarm_formulas_short_fold_0_loaded_per_class.svg",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_no_orb/shap_beeswarm_formulas_short_fold_0_loaded_top10_overall.svg",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_no_orb/shap_values_fold_0.csv",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_no_orb/top_10_shap_features_decomposition_fold_0_loaded.txt",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_no_orb/tsne_plot_shap_features_annotated_size.png",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_no_orb/tsne_plot_shap_features_annotated_size.svg",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_no_orb/tsne_plot_shap_features_size.png",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_no_orb/tsne_plot_shap_features_size.svg",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_no_orb/umap_plot_shap_features_annotated_size.png",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_no_orb/umap_plot_shap_features_annotated_size.svg",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_no_orb/umap_plot_shap_features_size.png",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_no_orb/umap_plot_shap_features_size.svg",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_orb/pca_plot_shap_features_annotated_size.png",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_orb/pca_plot_shap_features_annotated_size.svg",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_orb/pca_plot_shap_features_size.png",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_orb/pca_plot_shap_features_size.svg",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_orb/shap_beeswarm_cluster_formulas_full_fold_0_loaded.svg",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_orb/shap_beeswarm_cluster_formulas_none_fold_0_loaded.svg",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_orb/shap_beeswarm_cluster_formulas_short_fold_0_loaded.svg",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_orb/shap_beeswarm_formulas_full_fold_0_loaded.svg",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_orb/shap_beeswarm_formulas_full_fold_0_loaded_per_class.svg",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_orb/shap_beeswarm_formulas_full_fold_0_loaded_top10_overall.svg",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_orb/shap_beeswarm_formulas_none_fold_0_loaded.svg",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_orb/shap_beeswarm_formulas_none_fold_0_loaded_per_class.svg",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_orb/shap_beeswarm_formulas_none_fold_0_loaded_top10_overall.svg",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_orb/shap_beeswarm_formulas_short_fold_0_loaded.svg",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_orb/shap_beeswarm_formulas_short_fold_0_loaded_per_class.svg",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_orb/shap_beeswarm_formulas_short_fold_0_loaded_top10_overall.svg",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_orb/shap_values_fold_0.csv",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_orb/top_10_shap_features_decomposition_fold_0_loaded.txt",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_orb/tsne_plot_shap_features_annotated_size.png",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_orb/tsne_plot_shap_features_annotated_size.svg",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_orb/tsne_plot_shap_features_size.png",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_orb/tsne_plot_shap_features_size.svg",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_orb/umap_plot_shap_features_annotated_size.png",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_orb/umap_plot_shap_features_annotated_size.svg",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_orb/umap_plot_shap_features_size.png",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_orb/umap_plot_shap_features_size.svg",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_orb_coGN/pca_plot_shap_features_annotated_size.png",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_orb_coGN/pca_plot_shap_features_annotated_size.svg",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_orb_coGN/pca_plot_shap_features_size.png",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_orb_coGN/pca_plot_shap_features_size.svg",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_orb_coGN/shap_beeswarm_cluster_formulas_full_fold_0_loaded.svg",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_orb_coGN/shap_beeswarm_cluster_formulas_none_fold_0_loaded.svg",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_orb_coGN/shap_beeswarm_cluster_formulas_short_fold_0_loaded.svg",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_orb_coGN/shap_beeswarm_formulas_full_fold_0_loaded.svg",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_orb_coGN/shap_beeswarm_formulas_full_fold_0_loaded_per_class.svg",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_orb_coGN/shap_beeswarm_formulas_full_fold_0_loaded_top10_overall.svg",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_orb_coGN/shap_beeswarm_formulas_none_fold_0_loaded.svg",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_orb_coGN/shap_beeswarm_formulas_none_fold_0_loaded_per_class.svg",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_orb_coGN/shap_beeswarm_formulas_none_fold_0_loaded_top10_overall.svg",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_orb_coGN/shap_beeswarm_formulas_short_fold_0_loaded.svg",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_orb_coGN/shap_beeswarm_formulas_short_fold_0_loaded_per_class.svg",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_orb_coGN/shap_beeswarm_formulas_short_fold_0_loaded_top10_overall.svg",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_orb_coGN/shap_values_fold_0.csv",
+      "mattervial_perovskites_full_analysis/matbench_perovskites_mattervial_orb_coGN/top_10_shap_features_decomposition_fold_0_loaded.txt"
+    ]
+  },
+  "MatterVial_SupportData-branches": [
+    "main"
+  ],
+  "MatterVial_SupportData-tags": [],
+  "MatterVial-tree": {
+    "sha": "f58652097cebe96f383f17aa6798f4364e99564e",
+    "truncated": false,
+    "paths": [
+      "mattervial/interpreter/shap_plots",
+      "mattervial/interpreter/shap_values",
+      "tests/test_shap_download.py"
+    ]
+  },
+  "MatterVial-branches": [
+    "docs",
+    "master",
+    "orb-partial-occupancy"
+  ],
+  "MatterVial-tags": [
+    "v0.1.5"
+  ],
+  "MatterVial_public-tree": {
+    "sha": "2bfa5d5c45935507bc166e3fd9970bddefea4f81",
+    "truncated": false,
+    "paths": []
+  },
+  "MatterVial_public-branches": [
+    "master"
+  ],
+  "MatterVial_public-tags": [],
+  "modnet-tree": {
+    "sha": "7818a86a0af8e6649819aa7e6966494ae2a32c9b",
+    "truncated": false,
+    "paths": []
+  },
+  "modnet-branches": [
+    "master",
+    "patch-1",
+    "patch-2",
+    "patch-3"
+  ],
+  "modnet-tags": [],
+  "modnet_gnn_enhanced_v0.2.1-tree": {
+    "sha": "f9308d90b55e515847d4a4cb92966220c48b5082",
+    "truncated": false,
+    "paths": []
+  },
+  "modnet_gnn_enhanced_v0.2.1-branches": [
+    "master"
+  ],
+  "modnet_gnn_enhanced_v0.2.1-tags": [],
+  "modnet_misctools-tree": {
+    "sha": "dd307fbb6f7985c50470dc575743cc108414d7d6",
+    "truncated": false,
+    "paths": []
+  },
+  "modnet_misctools-branches": [
+    "master"
+  ],
+  "modnet_misctools-tags": [],
+  "modnet-pt-tree": {
+    "sha": "299c0ce0649aaf2355242157e4026a46ff3ff236",
+    "truncated": false,
+    "paths": []
+  },
+  "modnet-pt-branches": [
+    "main"
+  ],
+  "modnet-pt-tags": [],
+  "MatterVial_SupportData-commits": [
+    {
+      "sha": "ccc65ab78daad3553468d393d4427936a0540b9f",
+      "message": "New folder with additional datasets to validate MatterVial included"
+    },
+    {
+      "sha": "312bbaffe5c3b4a4e6478471f1e26dd901257cbb",
+      "message": "script to download dataset"
+    },
+    {
+      "sha": "4ff3eb88f05ca87acf1960b03090ff2e981bbaaf",
+      "message": "update readmes"
+    },
+    {
+      "sha": "eec72a28435855aa039101d08093ba84289b8378",
+      "message": "finalized updating the support data"
+    },
+    {
+      "sha": "21e8c29799a243c16c2400de70c7170f7d13c032",
+      "message": "Update README.md"
+    },
+    {
+      "sha": "b8cfb96dbd79a646716fe2534f1c6a4ecf79cc88",
+      "message": "readme update"
+    },
+    {
+      "sha": "cbd68f6008d1057113e8fd7989d6a96b76984d63",
+      "message": "out files added"
+    },
+    {
+      "sha": "269441e8370dc6292647fc2d4e8c469af4d63346",
+      "message": "Matbench evaluation added"
+    },
+    {
+      "sha": "931bce4d987a1f935201876bd3ab58cd2670efdb",
+      "message": "Removed submodule"
+    },
+    {
+      "sha": "c847002b1aedbf9f5bd0600753f831575713b2a6",
+      "message": "Updated with results on MatBench"
+    },
+    {
+      "sha": "7bcf171b6dd3f09f3e595d18b1ad6b7e26eb2882",
+      "message": "Update README.md"
+    },
+    {
+      "sha": "1766f4cf1e5b50f4304427b9bb7fb06a375a557a",
+      "message": "Update README.md"
+    },
+    {
+      "sha": "815902daab34b5ae77344a3451f9888f8419ac5e",
+      "message": "Update README.md"
+    },
+    {
+      "sha": "5c8f55a861e6ca2eb4cf2f65cfdeafac172dd095",
+      "message": "Update README.md"
+    },
+    {
+      "sha": "55fcca32b9254c5fa53d8c6dbe6c34b23d90cb7a",
+      "message": "Update README.md"
+    },
+    {
+      "sha": "578e90e6ec6357f6830a8f94de0b089a5cda892c",
+      "message": "Reorganized the data and finished all Tables in main text."
+    },
+    {
+      "sha": "8caf1e048701748a6cdf4401bc86a4583b48087d",
+      "message": "Tables 2 and 3, no dataset files."
+    },
+    {
+      "sha": "70f00921792fa1b36a3c022fc5d527d3d389122d",
+      "message": "Initialize the repository, adding first data on the baseline models."
+    },
+    {
+      "sha": "07e23822c3c7e4cced21becb836437e321440661",
+      "message": "Initial commit"
+    }
+  ],
+  "MatterVial_SupportData-releases": [],
+  "MatterVial_SupportData-issues": [],
+  "MatterVial_SupportData-forks": [
+    "keerthivasanC2004/MatterVial_SupportData",
+    "standardgalactic/MatterVial_SupportData"
+  ],
+  "MatterVial-commits": [
+    {
+      "sha": "f58652097cebe96f383f17aa6798f4364e99564e",
+      "message": "Fix optional featurizer imports so unavailable environment-specific modules do not break top-level package import"
+    },
+    {
+      "sha": "74b27ad0711690cf7f187976676a6448c147ae7d",
+      "message": "Expose public ROOST featurizer API and fix package re-export setup for top-level imports."
+    },
+    {
+      "sha": "0d17f9d24a7e0d982ab2845caf3205d520cccb08",
+      "message": "Update README to remove UV_CACHE_DIR export\n\nRemoved the UV_CACHE_DIR export line from the setup instructions."
+    },
+    {
+      "sha": "d6adfa556f5e91756ced2306e7715a5201016b90",
+      "message": "Update environment setup documentation and simplify conda configurations\n\n- Enhance README with clearer environment setup instructions using uv pip\n- "
+    },
+    {
+      "sha": "051cc86986c2c703c4b058af4102ed338e8f01b8",
+      "message": "Remove .pyc files from git tracking"
+    },
+    {
+      "sha": "46ea6bfac5db9d09a6143f36d10d7e5d640e383c",
+      "message": "Remove pgnn package from env_primary.yml"
+    },
+    {
+      "sha": "f1fb0120a35c1bef2153795a4f2683c1dec32aae",
+      "message": "Remove mattervial==0.1.4 from env_primary.yml\n\nRemove mattervial package from primary environment."
+    },
+    {
+      "sha": "ae548e163be9bfaf16bbc3dc31c9ab710a1e1ff1",
+      "message": "feat: bump version to 0.1.5 with performance optimizations\n\n- Optimize MEGNet graph processing with ThreadPool parallelization\n- Add robust tensor han"
+    },
+    {
+      "sha": "a8d8b18411ed29b01cb5d502a9d44a349cb2fff6",
+      "message": "Update citation details in CITATION.cff \n\nNow npj comp mat is used instead of preprint"
+    },
+    {
+      "sha": "ab9df63ee0039d4112d8dfd7c83f7677b0081212",
+      "message": "Revise citation and BibTeX for MatterVial paper\n\nUpdated citation for MatterVial paper with new reference and BibTeX entry."
+    },
+    {
+      "sha": "76df93eea6c6167c27c3bc95e18acffd5d5e4280",
+      "message": "Correct typo in MatterVial description"
+    },
+    {
+      "sha": "bae9eee2c035c4d7aa47b4dbd7379e7fe5b5fb9f",
+      "message": "Update README.md with supporting packages information\n\nAdded details about supporting packages for descriptor-oriented featurizers, including Autoenco"
+    },
+    {
+      "sha": "a11cd205dd239040f30e3884d53390f0b9a21c7f",
+      "message": "Update index.rst"
+    },
+    {
+      "sha": "575eda3dd54a6344d84d10814dc38282120a1105",
+      "message": "Create CITATION.cff"
+    },
+    {
+      "sha": "3a8d6c523b6f4a1bd5836b049d2d6c89b823d0f6",
+      "message": "Update README.md"
+    },
+    {
+      "sha": "b1bff57f12da4a4c2485286363e9e22bf2bf994b",
+      "message": "Update README.md"
+    },
+    {
+      "sha": "efb205df7d4132078d297006365abb956a5110f4",
+      "message": "Merge pull request #1 from rogeriog/docs\n\nUpdated code with example notebooks."
+    },
+    {
+      "sha": "28666e4f33254e9e89a683cb4ca606b26fbeb0a5",
+      "message": "Example notebooks updated, tyding up"
+    },
+    {
+      "sha": "f80129a626f27e476f73889361fd79321c6435fc",
+      "message": "just moved test decoder"
+    },
+    {
+      "sha": "d15785ff2df12d252f4884fc8399e7e08d18b162",
+      "message": "Logo adaptation for readdocs favicon"
+    },
+    {
+      "sha": "a46f57e30f780bf603a3dc80779d3e48a2226be4",
+      "message": "logo adaptation again"
+    },
+    {
+      "sha": "43e2b03c6be7a89df90553f33bc20d964ce29369",
+      "message": "logo adaptation for readthedocs"
+    },
+    {
+      "sha": "0450fbfdfc1eca3122a9e8fe43cf6eabc9500d14",
+      "message": "Configure Sphinx logo"
+    },
+    {
+      "sha": "0efe4246b2929ac4e9c87a67ccb70021df862a5e",
+      "message": "reqs update"
+    },
+    {
+      "sha": "dfde3e359f88bdcd286f217bd1f427c722581407",
+      "message": "readthedocs file"
+    },
+    {
+      "sha": "ba87a3eb51b2a8b620109fe10ce98d4ca5ddbb5e",
+      "message": "Delete DECODER_IMPLEMENTATION_SUMMARY.md"
+    },
+    {
+      "sha": "7e9bf37429f524c57f256c3456a60ac1ee58106d",
+      "message": "fixed issue in decoder upload"
+    },
+    {
+      "sha": "bb60f0761d970f28e9734affe5cfdf4584accf28",
+      "message": "v.1. production"
+    },
+    {
+      "sha": "1952ad22f35fed1402ca177a6d66c17cea12a540",
+      "message": "Delete build directory"
+    },
+    {
+      "sha": "7e97762b1e8f365ff0bc5b6969226a387cecf58e",
+      "message": "Delete build directory"
+    },
+    {
+      "sha": "a4276806e8bfef5f873d55b5015809d331646bd0",
+      "message": "Delete mattervial.egg-info directory"
+    },
+    {
+      "sha": "44a4831c7da82503cc6920633bc47eb156688d5d",
+      "message": "Delete mattervial.egg-info directory"
+    },
+    {
+      "sha": "a6a584bbd6a6b0af72c0006466367dfeeae54208",
+      "message": "Initilizing repo"
+    },
+    {
+      "sha": "99619d4a5388f52aca80f4e2613cb6d1bcc8d836",
+      "message": "Initilizing repo"
+    }
+  ],
+  "MatterVial-releases": [
+    {
+      "tag": "v0.1.5",
+      "assets": []
+    }
+  ],
+  "MatterVial-issues": [
+    {
+      "number": 2,
+      "title": "Replace print statements print(\"Warning:...\") with warnings.warn(\"...\").",
+      "body": "Hi, this small PR to replace print statements print(\"Warning:...\") with warnings.warn(\"...\"). Useful to silence them more easily using filterwarnings. ",
+      "url": "https://github.com/rogeriog/MatterVial/pull/2"
+    },
+    {
+      "number": 1,
+      "title": "Updated code with example notebooks.",
+      "body": null,
+      "url": "https://github.com/rogeriog/MatterVial/pull/1"
+    }
+  ],
+  "MatterVial-forks": [
+    "VicTrqt/MatterVial",
+    "jbouquiaux/MatterVial",
+    "hafnium49/MatterVial",
+    "standardgalactic/MatterVial"
+  ],
+  "figshare": {
+    "url": "https://api.figshare.com/v2/articles/27132093",
+    "files": [
+      {
+        "name": "MAE.txt",
+        "size": 31,
+        "download_url": "https://ndownloader.figshare.com/files/49487919"
+      },
+      {
+        "name": "MAE.txt",
+        "size": 31,
+        "download_url": "https://ndownloader.figshare.com/files/49487922"
+      },
+      {
+        "name": "MEGNetModel__adjacent_scaler.pkl",
+        "size": 555,
+        "download_url": "https://ndownloader.figshare.com/files/49487925"
+      },
+      {
+        "name": "MEGNetModel__adjacent_scaler.pkl",
+        "size": 555,
+        "download_url": "https://ndownloader.figshare.com/files/49487934"
+      },
+      {
+        "name": "MAE.txt",
+        "size": 30,
+        "download_url": "https://ndownloader.figshare.com/files/49487937"
+      },
+      {
+        "name": "MEGNetModel__adjacent_scaler.pkl",
+        "size": 555,
+        "download_url": "https://ndownloader.figshare.com/files/49487952"
+      },
+      {
+        "name": "MAE.txt",
+        "size": 31,
+        "download_url": "https://ndownloader.figshare.com/files/49487949"
+      },
+      {
+        "name": "MEGNetModel__adjacent.h5",
+        "size": 2399280,
+        "download_url": "https://ndownloader.figshare.com/files/49487946"
+      },
+      {
+        "name": "MEGNetModel__adjacent.h5",
+        "size": 2399248,
+        "download_url": "https://ndownloader.figshare.com/files/49487943"
+      },
+      {
+        "name": "MEGNetModel__adjacent_scaler.pkl",
+        "size": 555,
+        "download_url": "https://ndownloader.figshare.com/files/49487940"
+      },
+      {
+        "name": "MEGNetModel__adjacent.h5",
+        "size": 2399280,
+        "download_url": "https://ndownloader.figshare.com/files/49487973"
+      },
+      {
+        "name": "MEGNetModel__adjacent_scaler.pkl",
+        "size": 555,
+        "download_url": "https://ndownloader.figshare.com/files/49487970"
+      },
+      {
+        "name": "MEGNetModel__adjacent_scaler.pkl",
+        "size": 555,
+        "download_url": "https://ndownloader.figshare.com/files/49487967"
+      },
+      {
+        "name": "MEGNetModel__adjacent.h5",
+        "size": 2399280,
+        "download_url": "https://ndownloader.figshare.com/files/49487964"
+      },
+      {
+        "name": "MAE.txt",
+        "size": 31,
+        "download_url": "https://ndownloader.figshare.com/files/49487958"
+      },
+      {
+        "name": "MEGNetModel__adjacent_scaler.pkl",
+        "size": 555,
+        "download_url": "https://ndownloader.figshare.com/files/49487955"
+      },
+      {
+        "name": "MAE.txt",
+        "size": 31,
+        "download_url": "https://ndownloader.figshare.com/files/49487979"
+      },
+      {
+        "name": "MAE.txt",
+        "size": 31,
+        "download_url": "https://ndownloader.figshare.com/files/49487982"
+      },
+      {
+        "name": "MEGNetModel__adjacent.h5",
+        "size": 2399280,
+        "download_url": "https://ndownloader.figshare.com/files/49487985"
+      },
+      {
+        "name": "MEGNetModel__adjacent_scaler.pkl",
+        "size": 555,
+        "download_url": "https://ndownloader.figshare.com/files/49487991"
+      },
+      {
+        "name": "MAE.txt",
+        "size": 31,
+        "download_url": "https://ndownloader.figshare.com/files/49487988"
+      },
+      {
+        "name": "MAE.txt",
+        "size": 31,
+        "download_url": "https://ndownloader.figshare.com/files/49487994"
+      },
+      {
+        "name": "MEGNetModel__adjacent.h5",
+        "size": 2399248,
+        "download_url": "https://ndownloader.figshare.com/files/49487997"
+      },
+      {
+        "name": "MEGNetModel__adjacent.h5",
+        "size": 2399280,
+        "download_url": "https://ndownloader.figshare.com/files/49488051"
+      },
+      {
+        "name": "MEGNetModel__adjacent_scaler.pkl",
+        "size": 555,
+        "download_url": "https://ndownloader.figshare.com/files/49488000"
+      },
+      {
+        "name": "MAE.txt",
+        "size": 31,
+        "download_url": "https://ndownloader.figshare.com/files/49488003"
+      },
+      {
+        "name": "MEGNetModel__adjacent_scaler.pkl",
+        "size": 555,
+        "download_url": "https://ndownloader.figshare.com/files/49488054"
+      },
+      {
+        "name": "MEGNetModel__adjacent_scaler.pkl",
+        "size": 555,
+        "download_url": "https://ndownloader.figshare.com/files/49488009"
+      },
+      {
+        "name": "MEGNetModel__adjacent_scaler.pkl",
+        "size": 555,
+        "download_url": "https://ndownloader.figshare.com/files/49488057"
+      },
+      {
+        "name": "MEGNetModel__adjacent_scaler.pkl",
+        "size": 555,
+        "download_url": "https://ndownloader.figshare.com/files/49488060"
+      },
+      {
+        "name": "MEGNetModel__adjacent.h5",
+        "size": 2399280,
+        "download_url": "https://ndownloader.figshare.com/files/49488006"
+      },
+      {
+        "name": "MAE.txt",
+        "size": 31,
+        "download_url": "https://ndownloader.figshare.com/files/49488012"
+      },
+      {
+        "name": "MEGNetModel__adjacent_scaler.pkl",
+        "size": 555,
+        "download_url": "https://ndownloader.figshare.com/files/49488063"
+      },
+      {
+        "name": "MAE.txt",
+        "size": 31,
+        "download_url": "https://ndownloader.figshare.com/files/49488015"
+      },
+      {
+        "name": "MEGNetModel__adjacent_scaler.pkl",
+        "size": 555,
+        "download_url": "https://ndownloader.figshare.com/files/49488066"
+      },
+      {
+        "name": "MEGNetModel__adjacent_scaler.pkl",
+        "size": 555,
+        "download_url": "https://ndownloader.figshare.com/files/49488069"
+      },
+      {
+        "name": "MEGNetModel__adjacent_scaler.pkl",
+        "size": 555,
+        "download_url": "https://ndownloader.figshare.com/files/49488018"
+      },
+      {
+        "name": "MEGNetModel__adjacent_scaler.pkl",
+        "size": 555,
+        "download_url": "https://ndownloader.figshare.com/files/49488072"
+      },
+      {
+        "name": "MEGNetModel__adjacent.h5",
+        "size": 2399280,
+        "download_url": "https://ndownloader.figshare.com/files/49488021"
+      },
+      {
+        "name": "MEGNetModel__adjacent_scaler.pkl",
+        "size": 555,
+        "download_url": "https://ndownloader.figshare.com/files/49488075"
+      },
+      {
+        "name": "MEGNetModel__adjacent_scaler.pkl",
+        "size": 555,
+        "download_url": "https://ndownloader.figshare.com/files/49488024"
+      },
+      {
+        "name": "matbench_perovskites_moddata1000.pkl.gz",
+        "size": 3409693,
+        "download_url": "https://ndownloader.figshare.com/files/49488081"
+      },
+      {
+        "name": "MEGNetModel__adjacent_scaler.pkl",
+        "size": 555,
+        "download_url": "https://ndownloader.figshare.com/files/49488078"
+      },
+      {
+        "name": "MAE.txt",
+        "size": 31,
+        "download_url": "https://ndownloader.figshare.com/files/49488027"
+      },
+      {
+        "name": "MEGNetModel__adjacent.h5",
+        "size": 2399248,
+        "download_url": "https://ndownloader.figshare.com/files/49488084"
+      },
+      {
+        "name": "MEGNetModel__adjacent.h5",
+        "size": 2399280,
+        "download_url": "https://ndownloader.figshare.com/files/49488030"
+      },
+      {
+        "name": "MEGNetModel__adjacent.h5",
+        "size": 2399280,
+        "download_url": "https://ndownloader.figshare.com/files/49488090"
+      },
+      {
+        "name": "MEGNetModel__adjacent_scaler.pkl",
+        "size": 555,
+        "download_url": "https://ndownloader.figshare.com/files/49488087"
+      },
+      {
+        "name": "MEGNetModel__adjacent.h5",
+        "size": 2399280,
+        "download_url": "https://ndownloader.figshare.com/files/49488093"
+      },
+      {
+        "name": "MEGNetModel__adjacent_scaler.pkl",
+        "size": 555,
+        "download_url": "https://ndownloader.figshare.com/files/49488033"
+      },
+      {
+        "name": "MEGNetModel__adjacent.h5",
+        "size": 2399280,
+        "download_url": "https://ndownloader.figshare.com/files/49488036"
+      },
+      {
+        "name": "MEGNetModel__adjacent.h5",
+        "size": 2399280,
+        "download_url": "https://ndownloader.figshare.com/files/49488096"
+      },
+      {
+        "name": "MEGNetModel__adjacent.h5",
+        "size": 2399248,
+        "download_url": "https://ndownloader.figshare.com/files/49488039"
+      },
+      {
+        "name": "MEGNetModel__adjacent.h5",
+        "size": 2399280,
+        "download_url": "https://ndownloader.figshare.com/files/49488099"
+      },
+      {
+        "name": "MEGNetModel__adjacent.h5",
+        "size": 2399280,
+        "download_url": "https://ndownloader.figshare.com/files/49488042"
+      },
+      {
+        "name": "MEGNetModel__adjacent.h5",
+        "size": 2399248,
+        "download_url": "https://ndownloader.figshare.com/files/49488102"
+      },
+      {
+        "name": "MEGNetModel__adjacent.h5",
+        "size": 2399280,
+        "download_url": "https://ndownloader.figshare.com/files/49488045"
+      },
+      {
+        "name": "MEGNetModel__adjacent.h5",
+        "size": 2399280,
+        "download_url": "https://ndownloader.figshare.com/files/49488105"
+      },
+      {
+        "name": "MEGNetModel__adjacent.h5",
+        "size": 2399280,
+        "download_url": "https://ndownloader.figshare.com/files/49488048"
+      },
+      {
+        "name": "MEGNetModel__adjacent.h5",
+        "size": 2399280,
+        "download_url": "https://ndownloader.figshare.com/files/49488108"
+      },
+      {
+        "name": "MEGNetModel__adjacent.h5",
+        "size": 2399280,
+        "download_url": "https://ndownloader.figshare.com/files/49488111"
+      },
+      {
+        "name": "MEGNetModel__adjacent.h5",
+        "size": 2399280,
+        "download_url": "https://ndownloader.figshare.com/files/49488114"
+      },
+      {
+        "name": "matbench_perovskites_moddata5000.pkl.gz",
+        "size": 16017585,
+        "download_url": "https://ndownloader.figshare.com/files/49488117"
+      },
+      {
+        "name": "matbench_perovskites2.2f_40cr.pkl.gz",
+        "size": 37414089,
+        "download_url": "https://ndownloader.figshare.com/files/49488120"
+      },
+      {
+        "name": "matbench_perovskites2.2f_60cr.pkl.gz",
+        "size": 55156098,
+        "download_url": "https://ndownloader.figshare.com/files/49488123"
+      },
+      {
+        "name": "matbench_perovskites_moddata.pkl.gz",
+        "size": 59285724,
+        "download_url": "https://ndownloader.figshare.com/files/49488129"
+      },
+      {
+        "name": "matbench_perovskites_MEGNetPred_encodMM60p.pkl.gz",
+        "size": 51934449,
+        "download_url": "https://ndownloader.figshare.com/files/49488126"
+      },
+      {
+        "name": "matbench_perovskites_moddata_OFMoriginal.pkl.gz",
+        "size": 64054050,
+        "download_url": "https://ndownloader.figshare.com/files/49488132"
+      },
+      {
+        "name": "matbench_perovskites_matminerOFM.pkl.gz",
+        "size": 71908827,
+        "download_url": "https://ndownloader.figshare.com/files/49488135"
+      },
+      {
+        "name": "matbench_perovskites_moddata_MMOFMencod10.pkl.gz",
+        "size": 63251608,
+        "download_url": "https://ndownloader.figshare.com/files/49488138"
+      },
+      {
+        "name": "matbench_perovskites_MNetencodMM60p_MNetencodOFM20p.pkl.gz",
+        "size": 64875289,
+        "download_url": "https://ndownloader.figshare.com/files/49488141"
+      },
+      {
+        "name": "matbench_perovskites_moddata_MMOFMencod20.pkl.gz",
+        "size": 71732160,
+        "download_url": "https://ndownloader.figshare.com/files/49488144"
+      },
+      {
+        "name": "matbench_perovskites2.2f_80cr.pkl.gz",
+        "size": 73243443,
+        "download_url": "https://ndownloader.figshare.com/files/49488147"
+      },
+      {
+        "name": "matbench_perovskites_moddata_MM80_MEGNet32.pkl.gz",
+        "size": 67789405,
+        "download_url": "https://ndownloader.figshare.com/files/49488150"
+      },
+      {
+        "name": "matbench_perovskites_moddata_PCAMM.pkl.gz",
+        "size": 71237872,
+        "download_url": "https://ndownloader.figshare.com/files/49488153"
+      },
+      {
+        "name": "matbench_perovskites_matminerOFMPre.pkl.gz",
+        "size": 81444439,
+        "download_url": "https://ndownloader.figshare.com/files/49488156"
+      },
+      {
+        "name": "matbench_perovskites_moddata_OFMPCA.pkl.gz",
+        "size": 89409824,
+        "download_url": "https://ndownloader.figshare.com/files/49488159"
+      },
+      {
+        "name": "matbench_perovskites_100cr_g2.2f.pkl.gz",
+        "size": 91406273,
+        "download_url": "https://ndownloader.figshare.com/files/49488162"
+      },
+      {
+        "name": "matbench_perovskites_matminerOFMPre.pkl.gz",
+        "size": 81444439,
+        "download_url": "https://ndownloader.figshare.com/files/49488165"
+      },
+      {
+        "name": "oqmdhalides_widebandgap_featurizedOmegaEformROSA_complete",
+        "size": 378500423,
+        "download_url": "https://ndownloader.figshare.com/files/49488168"
+      },
+      {
+        "name": "oqmdhalides_stab_featurizedOmegaEformROSA_complete",
+        "size": 1369708243,
+        "download_url": "https://ndownloader.figshare.com/files/49488171"
+      }
+    ]
+  }
+}

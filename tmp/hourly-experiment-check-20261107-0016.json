@@ -1,0 +1,34 @@
+{
+  "checked_at": "2026-11-07T00:16:32.2392868+08:00",
+  "steel_state": "paused_for_method_alignment",
+  "steel_progress": {
+    "stage": "official_ga",
+    "generation": 0,
+    "completed": 242,
+    "total": 250,
+    "last_member": "C:\\Users\\User\\Desktop\\kan_cgcnn\\benchmarks\\steels-paper-reproduction-20261102\\lmp-v4-trained-shap-validation\\formal\\modnet\\fold-0\\native\\modnet\\generation-00-candidate-48-inner-1"
+  },
+  "steel_all_expected_threads_suspended": true,
+  "steel_new_completed_folds": 0,
+  "benchmark_status": {
+    "state": "training",
+    "pid": 17012,
+    "task": "matbench_dielectric",
+    "updated_at": "2026-11-07T00:14:16.892532+08:00",
+    "wall_seconds": 380626.047,
+    "arm": "mm_kan",
+    "fold": 2,
+    "generation": 7,
+    "generation_completed": 89,
+    "generation_total": 100,
+    "completed": 789,
+    "total": 1000,
+    "last_mae": 0.33087784620845984
+  },
+  "benchmark_workers_cpu_active": true,
+  "benchmark_completed_fold_counts": {
+    "mm_modnet": 5,
+    "mm_kan": 2
+  },
+  "method_evidence": "No new verified artifacts obtained during this check"
+}

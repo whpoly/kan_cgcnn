@@ -1,0 +1,39 @@
+{
+  "previous_checked_at": "2026-11-08T18:49:38.1951288+08:00",
+  "steel_new_fits": 526,
+  "benchmark_status": {
+    "state": "training",
+    "pid": 17012,
+    "task": "matbench_dielectric",
+    "updated_at": "2026-11-08T19:42:37.8617+08:00",
+    "wall_seconds": 537127.0150000001,
+    "arm": "mm_kan",
+    "fold": 4,
+    "generation": 7,
+    "generation_completed": 12,
+    "generation_total": 100,
+    "completed": 712,
+    "total": 1000,
+    "last_mae": 0.25893038495450815
+  },
+  "steel_status": {
+    "state": "genetic_search",
+    "pid": 24796,
+    "updated_at": "2026-11-08T16:30:31.005827+08:00",
+    "fold": 0,
+    "stage": "native",
+    "progress": "C:\\Users\\User\\Desktop\\kan_cgcnn\\benchmarks\\steel396-shap-pair-20261108\\formal\\fold-0\\native\\progress.json"
+  },
+  "new_fits_since_previous": 25,
+  "steel_workers_cpu_active": true,
+  "steel_total_formal_fits": 2066,
+  "benchmark_workers_cpu_active": true,
+  "checked_at": "2026-11-08T19:44:08.8662889+08:00",
+  "steel_progress": {
+    "stage": "official_ga",
+    "generation": 8,
+    "completed": 66,
+    "total": 250,
+    "last_member": "C:\\Users\\User\\Desktop\\kan_cgcnn\\benchmarks\\steel396-shap-pair-20261108\\formal\\fold-0\\native\\modnet\\generation-08-candidate-13-inner-0"
+  }
+}

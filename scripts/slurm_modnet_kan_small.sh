@@ -33,6 +33,7 @@ ALL_TASKS=(
   matbench_perovskites
   matbench_phonons
   matbench_steels
+  matbench_expt_is_metal
 )
 
 SMALL_TASKS=(
@@ -112,8 +113,8 @@ for task in "${TASKS[@]}"; do
     --num-random-trials 12 \
     --max-trials-per-family 12 \
     --metric auto \
-    --tune-epochs 80 \
-    --final-epochs 300 \
+    --tune-epochs 1000 \
+    --final-epochs 1000 \
     --batch-size 64 \
     --val-ratio 0.1 \
     --early-stopping-patience 60 \

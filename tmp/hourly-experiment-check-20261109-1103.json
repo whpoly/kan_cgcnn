@@ -1,0 +1,32 @@
+{
+  "checked_at": "2026-11-09T11:03:23.2306469+08:00",
+  "benchmark_status": {
+    "state": "feature_cross_nmi",
+    "pid": 17012,
+    "task": "matbench_dielectric",
+    "updated_at": "2026-11-09T11:02:10.329633+08:00",
+    "wall_seconds": 592299.4839999999,
+    "bank": "mm_mv",
+    "fold": 0,
+    "completed": 66,
+    "total": 3652
+  },
+  "previous_checked_at": "2026-11-09T10:06:14.5419743+08:00",
+  "steel_status": {
+    "state": "native_feature_ranking",
+    "pid": 24796,
+    "updated_at": "2026-11-09T11:02:12.612493+08:00",
+    "fold": 1,
+    "inner": 4
+  },
+  "new_fits_since_previous": 0,
+  "stage_counts": {
+    "native": 3000,
+    "top50": 3000,
+    "mass50": 5000
+  },
+  "steel_cpu_active": true,
+  "benchmark_workers_cpu_active": true,
+  "steel_new_fits": 345.0,
+  "steel_total_formal_fits": 11000.0
+}

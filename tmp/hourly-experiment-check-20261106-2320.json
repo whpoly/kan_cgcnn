@@ -1,0 +1,41 @@
+{
+  "checked_at": "2026-11-06T23:20:48.9333136+08:00",
+  "steel_status": {
+    "state": "validation_search",
+    "pid": 18848,
+    "updated_at": "2026-11-06T23:14:07.309691+08:00",
+    "arm": "modnet",
+    "fold": 0,
+    "option": "native",
+    "progress": "C:\\Users\\User\\Desktop\\kan_cgcnn\\benchmarks\\steels-paper-reproduction-20261102\\lmp-v4-trained-shap-validation\\formal\\modnet\\fold-0\\native\\progress.json"
+  },
+  "steel_progress": {
+    "stage": "official_ga",
+    "generation": 0,
+    "completed": 84,
+    "total": 250,
+    "last_member": "C:\\Users\\User\\Desktop\\kan_cgcnn\\benchmarks\\steels-paper-reproduction-20261102\\lmp-v4-trained-shap-validation\\formal\\modnet\\fold-0\\native\\modnet\\generation-00-candidate-16-inner-4"
+  },
+  "steel_completed_outer_folds": 0,
+  "benchmark_status": {
+    "state": "training",
+    "pid": 17012,
+    "task": "matbench_dielectric",
+    "updated_at": "2026-11-06T23:18:00.498623+08:00",
+    "wall_seconds": 377249.65599999996,
+    "arm": "mm_kan",
+    "fold": 2,
+    "generation": 7,
+    "generation_completed": 55,
+    "generation_total": 100,
+    "completed": 755,
+    "total": 1000,
+    "last_mae": 0.2554716375099766
+  },
+  "cpu_activity_verified": true,
+  "paused_pids": [
+    32676,
+    23064,
+    14412
+  ]
+}

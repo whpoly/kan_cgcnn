@@ -1,0 +1,10 @@
+{
+  "passed": true,
+  "scope": "New fold artifact consistency only; full protocol audit pending",
+  "fold": 2,
+  "mae": 0.3991202457468153,
+  "n": 953,
+  "fits": 1000,
+  "prediction_sha256": "94a3bf060a2e4b73fac943ca1af9d47cc219cd629f02dceac428be0b84b5dcb1",
+  "id_mapping": "Internal idN compared via official split to mb-dielectric IDs"
+}

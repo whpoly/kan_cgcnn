@@ -1,0 +1,58 @@
+{
+  "checked_at": "2026-11-07T09:29:55.1724425+08:00",
+  "steel_state": "paused_for_method_alignment",
+  "steel_completed_fit_count": 242,
+  "steel_new_completed_folds": 0,
+  "process_cpu_sample": [
+    {
+      "Pid": 4564,
+      "CpuSecondsAdded": 0.0
+    },
+    {
+      "Pid": 11668,
+      "CpuSecondsAdded": 0.0
+    },
+    {
+      "Pid": 14144,
+      "CpuSecondsAdded": 4.906
+    },
+    {
+      "Pid": 18848,
+      "CpuSecondsAdded": 0.0
+    },
+    {
+      "Pid": 21692,
+      "CpuSecondsAdded": 0.0
+    },
+    {
+      "Pid": 28976,
+      "CpuSecondsAdded": 4.938
+    },
+    {
+      "Pid": 30164,
+      "CpuSecondsAdded": 5.016
+    }
+  ],
+  "benchmark_status": {
+    "state": "training",
+    "pid": 17012,
+    "task": "matbench_dielectric",
+    "updated_at": "2026-11-07T09:29:12.349736+08:00",
+    "wall_seconds": 413921.5,
+    "arm": "mm_kan",
+    "fold": 3,
+    "generation": 2,
+    "generation_completed": 89,
+    "generation_total": 100,
+    "completed": 289,
+    "total": 1000,
+    "last_mae": 0.3446508576955921
+  },
+  "benchmark_completed_fold_counts": {
+    "mm_kan": 3,
+    "mm_modnet": 5
+  },
+  "new_fits_since_previous": 55,
+  "previous_checked_at": "2026-11-07T08:24:52.1859771+08:00",
+  "method_evidence": "Expanded source investigation documented in source-search-20261107/findings.json; missing OQMD pooling under generic group rule; steel-specific thresholds and artifacts unresolved."
+}

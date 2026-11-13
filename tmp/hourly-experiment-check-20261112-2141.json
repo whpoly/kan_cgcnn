@@ -1,0 +1,154 @@
+{
+  "checked_at": "2026-11-12T21:41:53.439718+08:00",
+  "previous_checked_at": "2026-11-12T20:43:27.605364+08:00",
+  "benchmark_status": {
+    "state": "feature_cross_nmi",
+    "pid": 17012,
+    "task": "matbench_dielectric",
+    "updated_at": "2026-11-12T13:40:53.205001+00:00",
+    "wall_seconds": 889822.3589999999,
+    "bank": "mm_mv",
+    "fold": 1,
+    "completed": 99,
+    "total": 3652
+  },
+  "new_fits_since_previous": 0,
+  "new_rows": 17,
+  "new_feature_pairs": 40460,
+  "feature_pairs_completed": 235620,
+  "fold0_reference_pair_count": 5860750,
+  "active_interval_seconds": 3466.2659999998286,
+  "estimated_remaining_cross_nmi_seconds": 481912.9229999762,
+  "priority_kan_status": {
+    "state": "training",
+    "pid": 25844,
+    "updated_at": "2026-11-12T13:41:19.885091+00:00",
+    "arm": "mm_mv_kan",
+    "fold": 0,
+    "generation": 1,
+    "generation_completed": 9,
+    "generation_total": 100,
+    "completed": 109,
+    "total": 1000,
+    "last_mae": 0.3522122848934537
+  },
+  "priority_kan_completed": 109,
+  "priority_kan_new_fits": 21,
+  "priority_kan_active_members": [
+    [
+      "generation-01-candidate-01-inner-4",
+      null
+    ],
+    [
+      "generation-01-candidate-02-inner-0",
+      null
+    ]
+  ],
+  "priority_kan_estimated_remaining_seconds": 148747.5433021954,
+  "priority_kan_interval_seconds": 3505.8343539237976,
+  "processes": [
+    {
+      "pid": 23400,
+      "parent": 13936,
+      "cmd": "\"C:\\Users\\User\\.conda\\envs\\modnet-v012-matbench\\python.exe\" -u scripts/queue_matbench_expansion.py",
+      "cpu_delta": 0
+    },
+    {
+      "pid": 17012,
+      "parent": 23400,
+      "cmd": "C:\\Users\\User\\.conda\\envs\\modnet-v012-matbench\\python.exe -u C:\\Users\\User\\Desktop\\kan_cgcnn\\scripts\\run_native_matbench_expansion.py --task matbench_dielectric --csv C:\\Users\\User\\Desktop\\kan_cgcnn\\benchmarks\\matbench-expansion-20261101\\source\\matbench_dielectric_featurizedMM2020Struct_mattervial.csv --output C:\\Users\\User\\Desktop\\kan_cgcnn\\benchmarks\\matbench-expansion-20261101\\matbench_dielectric --n-jobs 3",
+      "cpu_delta": 0
+    },
+    {
+      "pid": 22372,
+      "parent": 8896,
+      "cmd": "\"C:\\Users\\User\\.conda\\envs\\modnet-v012-matbench\\python.exe\" -u scripts/queue_additional_regressions_v3.py",
+      "cpu_delta": 0
+    },
+    {
+      "pid": 12444,
+      "parent": 10580,
+      "cmd": "\"C:\\Users\\User\\.conda\\envs\\modnet-v012-matbench\\python.exe\" -u scripts/queue_native_classification_v4.py",
+      "cpu_delta": 0
+    },
+    {
+      "pid": 40468,
+      "parent": 17012,
+      "cmd": "\"C:\\Users\\User\\.conda\\envs\\modnet-v012-matbench\\python.exe\" \"-c\" \"from multiprocessing.spawn import spawn_main; spawn_main(parent_pid=17012, pipe_handle=13352)\" \"--multiprocessing-fork\"",
+      "cpu_delta": 2.0625
+    },
+    {
+      "pid": 26636,
+      "parent": 17012,
+      "cmd": "\"C:\\Users\\User\\.conda\\envs\\modnet-v012-matbench\\python.exe\" \"-c\" \"from multiprocessing.spawn import spawn_main; spawn_main(parent_pid=17012, pipe_handle=17384)\" \"--multiprocessing-fork\"",
+      "cpu_delta": 2.0625
+    },
+    {
+      "pid": 29848,
+      "parent": 17012,
+      "cmd": "\"C:\\Users\\User\\.conda\\envs\\modnet-v012-matbench\\python.exe\" \"-c\" \"from multiprocessing.spawn import spawn_main; spawn_main(parent_pid=17012, pipe_handle=13004)\" \"--multiprocessing-fork\"",
+      "cpu_delta": 2.046875
+    },
+    {
+      "pid": 25844,
+      "parent": 11452,
+      "cmd": "\"C:\\Users\\User\\.conda\\envs\\modnet-v012-matbench\\python.exe\" -u scripts/run_dielectric_first_fold_kan.py",
+      "cpu_delta": 0
+    },
+    {
+      "pid": 14216,
+      "parent": 25844,
+      "cmd": "\"C:\\Users\\User\\.conda\\envs\\modnet-v012-matbench\\python.exe\" \"-c\" \"from multiprocessing.spawn import spawn_main; spawn_main(parent_pid=25844, pipe_handle=4696)\" \"--multiprocessing-fork\"",
+      "cpu_delta": 2.0625
+    },
+    {
+      "pid": 42612,
+      "parent": 25844,
+      "cmd": "\"C:\\Users\\User\\.conda\\envs\\modnet-v012-matbench\\python.exe\" \"-c\" \"from multiprocessing.spawn import spawn_main; spawn_main(parent_pid=25844, pipe_handle=4052)\" \"--multiprocessing-fork\"",
+      "cpu_delta": 1.96875
+    }
+  ],
+  "completed_folds": {
+    "mm_modnet": 5,
+    "mm_kan": 5,
+    "mm_mv_modnet": 1,
+    "mm_mv_kan": 0
+  },
+  "queues": {
+    "queue-status": {
+      "pid": 23400,
+      "updated_at": "2026-11-02T14:30:14+0800",
+      "state": "running",
+      "task": "matbench_dielectric",
+      "child_pid": 17012,
+      "command": [
+        "C:\\Users\\User\\.conda\\envs\\modnet-v012-matbench\\python.exe",
+        "-u",
+        "C:\\Users\\User\\Desktop\\kan_cgcnn\\scripts\\run_native_matbench_expansion.py",
+        "--task",
+        "matbench_dielectric",
+        "--csv",
+        "C:\\Users\\User\\Desktop\\kan_cgcnn\\benchmarks\\matbench-expansion-20261101\\source\\matbench_dielectric_featurizedMM2020Struct_mattervial.csv",
+        "--output",
+        "C:\\Users\\User\\Desktop\\kan_cgcnn\\benchmarks\\matbench-expansion-20261101\\matbench_dielectric",
+        "--n-jobs",
+        "3"
+      ]
+    },
+    "queue-additional-status": {
+      "pid": 22372,
+      "updated_at": "2026-11-12T21:41:35+0800",
+      "state": "waiting_for_steels_and_dielectric"
+    },
+    "queue-classification-status": {
+      "pid": 12444,
+      "updated_at": "2026-11-12T21:41:34+0800",
+      "state": "waiting_for_all_first_wave_regressions",
+      "smoke_tasks_passed": [
+        "matbench_expt_is_metal",
+        "matbench_glass"
+      ]
+    }
+  },
+  "new_training_failure_seen": false
+}

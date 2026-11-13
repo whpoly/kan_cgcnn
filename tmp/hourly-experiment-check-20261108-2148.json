@@ -1,0 +1,57 @@
+{
+  "shap_inner": [
+    {
+      "inner": "inner-0",
+      "at": "21:21:53",
+      "mass": 36,
+      "top": 50
+    },
+    {
+      "inner": "inner-1",
+      "at": "21:30:12",
+      "mass": 25,
+      "top": 50
+    },
+    {
+      "inner": "inner-2",
+      "at": "21:39:00",
+      "mass": 27,
+      "top": 50
+    },
+    {
+      "inner": "inner-3",
+      "at": "21:47:00",
+      "mass": 26,
+      "top": 50
+    }
+  ],
+  "steel_total_formal_fits": 3000,
+  "previous_checked_at": "2026-11-08T20:52:09.9788819+08:00",
+  "steel_new_fits": 210,
+  "steel_status": {
+    "state": "shared_shap_ranking",
+    "pid": 24796,
+    "updated_at": "2026-11-08T21:47:00.351742+08:00",
+    "fold": 0,
+    "inner": 4
+  },
+  "benchmark_workers_cpu_active": true,
+  "benchmark_status": {
+    "state": "training",
+    "pid": 17012,
+    "task": "matbench_dielectric",
+    "updated_at": "2026-11-08T21:48:19.678583+08:00",
+    "wall_seconds": 544668.8430000001,
+    "arm": "mm_kan",
+    "fold": 4,
+    "generation": 7,
+    "generation_completed": 69,
+    "generation_total": 100,
+    "completed": 769,
+    "total": 1000,
+    "last_mae": 0.2442815358940831
+  },
+  "steel_cpu_active": true,
+  "new_fits_since_previous": 27,
+  "checked_at": "2026-11-08T21:48:43.9635014+08:00"
+}

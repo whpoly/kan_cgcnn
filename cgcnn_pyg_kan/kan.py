@@ -197,6 +197,7 @@ class FastKANMLP(nn.Module):
         num_grids: int = 3,
         grid_min: float = -2.0,
         grid_max: float = 2.0,
+        use_layernorm: bool = True,
     ) -> None:
         super().__init__()
         if isinstance(hidden_dims, int):
@@ -211,6 +212,7 @@ class FastKANMLP(nn.Module):
                     grid_min=grid_min,
                     grid_max=grid_max,
                     num_grids=num_grids,
+                    use_layernorm=use_layernorm,
                 )
             )
             if idx < len(dims) - 2 and dropout > 0:
@@ -248,5 +250,6 @@ def make_kan_mlp(
             out_dim,
             dropout=dropout,
             num_grids=grid_size,
+            use_layernorm=use_layernorm,
         )
     raise ValueError(f"unsupported KAN implementation {impl!r}")

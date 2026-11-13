@@ -1,0 +1,16 @@
+{
+  "reason": "User requests fresh paper-aligned steel run from fold zero, replacing v3",
+  "paused_at": "2026-11-06T22:48:08.0449082+08:00",
+  "processes": [
+    {
+      "command_line": "\"C:\\Users\\User\\.conda\\envs\\modnet-v013-mattervial\\python.exe\" -u scripts/steels_shap_reconstruction_v3.py formal",
+      "pid": 32676,
+      "creation_date": "2026-11-05T10:59:39.5123510+08:00"
+    },
+    {
+      "command_line": "\"C:\\Users\\User\\.conda\\envs\\modnet-v013-mattervial\\python.exe\" \"-c\" \"from multiprocessing.spawn import spawn_main; spawn_main(parent_pid=32676, pipe_handle=7584)\" \"--multiprocessing-fork\"",
+      "pid": 23064,
+      "creation_date": "2026-11-06T21:28:16.9358880+08:00"
+    }
+  ]
+}

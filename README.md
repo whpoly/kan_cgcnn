@@ -2,19 +2,44 @@
 
 ## MODNet KAN Benchmark Quickstart
 
-This repo includes a descriptor-based benchmark that keeps MODNet's official
-feature selection while allowing the neural hierarchy itself to change. The
-default comparison is the MLP reference against compact all-KAN `fastkan` and
-`spline` models. All families search the same 256/512 descriptor counts; KAN
-parameter savings must come from skipped common/group/property/target blocks,
-narrower non-expanding widths, and smaller grids rather than fewer descriptors.
-Hybrid and direct families remain available as ablations.
+This repo compares a PyTorch MODNet-style MLP hierarchy with hybrid and full
+KAN predictors. The local descriptor pipeline uses a lightweight matminer
+feature set and an approximate MI/Pearson relevance-redundancy selector. It is
+**not** the official MODNet descriptor/feature-selection pipeline.
+`--precomputed-feature-dir` instead consumes exports from official MODNet.
 
-The default tuner uses strict nested Matbench evaluation. Every outer fold has
-its own five-fold inner hyperparameter search; the outer test fold is evaluated
-only after that fold's model configuration and epoch count are fixed. KAN
-pruning is not a tuning variable. It is run afterward as a fixed interpretation
-ablation and never changes the main unpruned benchmark score.
+The tuner separates outer test evaluation from inner model selection. However,
+official exports currently rank descriptors using the entire outer training
+partition, then reuse those ranks for inner validation. This keeps the outer
+test isolated, but **does not provide strictly nested feature selection**.
+Strict feature-selection nesting requires raw descriptors and a fresh ranking
+inside every inner training split; a preselected outer-fold prefix is insufficient.
+The local pipeline refits its approximate selector inside each inner training split.
+
+The default full-KAN search uses 16/32/64/128 descriptors; the MLP reference
+reuses its official fold-specific preset. Such a comparison changes both the
+predictor and its inputs. Use identical descriptor lists to isolate architecture
+effects, and report the different-input search as a separate experiment.
+Pruning is disabled in the main benchmark and disabled by default post hoc.
+
+### Controlled architecture audit
+
+```powershell
+python scripts/benchmark_modnet_controlled.py `
+  --output-dir benchmarks/controlled-audit-20261020
+```
+
+This runs steels, phonons, and dielectric on all five official Matbench folds,
+with three initialization seeds and five fixed architectures (225 fits).
+All architectures use the same 64 descriptors within a fold. Feature selection,
+imputation and input/target scaling use only the inner training subset; a fixed
+20% validation subset selects the checkpoint. Settings are fixed in advance,
+with no test-driven tuning. This is a diagnostic on lightweight descriptors,
+not an official MODNet reproduction or a full nested hyperparameter search.
+The runner saves split IDs, descriptor names, predictions, source hashes,
+package versions, per-run metrics, and paired fold differences. Reported fold
+standard deviations average initialization seeds within each fold first.
+The 400-epoch budget is diagnostic; Matbench itself does not prescribe 1000 epochs.
 
 Create the PyTorch/KAN environment:
 
@@ -106,8 +131,8 @@ The default reliable tuning protocol is:
   are trained together as the two-output `matbench_elastic` model, then
   reported per target, covering all 13 original Matbench tasks;
 - each outer fold `0..4` independently uses five inner folds for KAN model and
-  hyperparameter selection; no configuration is shared across overlapping
-  outer folds;
+  hyperparameter selection; precomputed descriptor ranks are shared across
+  the inner folds as described in the caveat above;
 - MLP is not searched again: each fold reuses the `best_preset` saved by the
   completed official MODNet run;
 - tuning and final fitting both use the official maximum of 1000 epochs with
@@ -120,7 +145,7 @@ The default reliable tuning protocol is:
 - active KAN widths are non-expanding and much narrower than the MLP baseline;
 - KAN grid sizes `2`, `3`, and `5`, spline orders `2` and `3`, official-style
   learning rates, and architecture sizes are tuned with MAE loss; pruning is
-  fixed at `0.3` only in the post-hoc run;
+  disabled by default and may be enabled separately for post-hoc analysis;
 - post-hoc symbolic regression evaluates `5..10` descriptor inputs and at most
   10 terms from a protected common-function library (`x`, powers, products,
   ratios, `sin`, `cos`, `tanh`, `exp`, `log`, `sqrt`, and reciprocal), selects
@@ -924,6 +949,31 @@ metadata in one `.npz` file. The head benchmark standardizes features and
 targets using only the train split, then reports MAE/RMSE/R2 for each head. Use
 `--split formula` for a stricter formula-disjoint split; use `--split random`
 when you want a faster diagnostic comparison.
+
+## Official MODNet and matched KAN comparison
+
+The three-task reproduction for steels, phonons, and dielectric is specified in
+[the matched protocol](docs/modnet_official_matched_protocol_20261021.md).
+`scripts/run_modnet_official_matched.py` uses MODNet 0.1.12's native GA,
+TensorFlow training, official descriptors and five outer folds. It first trains
+all MODNet baselines, then runs a final-layer FastKAN replacement and an all-layer
+FastKAN replacement with the same selected configurations and ensemble members.
+Published-score rescoring, smoke tests, and newly trained results are distinct
+artifacts; a running job is not a completed reproduction.
+
+On Windows, `scripts/start_modnet_official_matched.ps1` starts or resumes the
+prepared experiment in a hidden process. Training state is in
+`benchmarks/official-aligned-20261021/matched-status.json`; the full protocol,
+per-member checkpoints and fold predictions are saved beside it. This workflow
+requires the isolated official MODNet environment, not the PyTorch environment.
+
+Round two is specified in [the inner-validation protocol](docs/modnet_hybrid_nested_protocol_20261022.md).
+`scripts/start_modnet_hybrid_nested.ps1` launches residual KAN readouts, final-hidden-layer
+KAN replacements, and a separate parameter-matched MLP control for each. Six candidates
+per fixed base configuration are selected using the five saved inner folds. All 15
+outer-fold selections are locked before new outer-test predictions are produced.
+The workflow reuses round-one features, splits, seeds and 50-member ensembles, and
+writes progress to `benchmarks/hybrid-nested-20261022/hybrid-status.json`.
 
 ## Model Usage
 

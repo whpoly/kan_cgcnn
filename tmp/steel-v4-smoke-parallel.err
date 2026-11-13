@@ -1,0 +1,32 @@
+
+  0%|          | 0/24 [00:00<?, ?it/s]
+  4%|�l         | 1/24 [00:16<06:08, 16.04s/it]
+100%|�i�i�i�i�i�i�i�i�i�i| 24/24 [00:16<00:00,  1.50it/s]
+
+  0%|          | 0/55 [00:00<?, ?it/s]
+  2%|�j         | 1/55 [00:00<00:16,  3.36it/s]
+100%|�i�i�i�i�i�i�i�i�i�i| 55/55 [00:00<00:00, 180.93it/s]
+
+  0%|          | 0/24 [00:00<?, ?it/s]
+  4%|�l         | 1/24 [00:16<06:08, 16.04s/it]
+100%|�i�i�i�i�i�i�i�i�i�i| 24/24 [00:16<00:00,  1.50it/s]
+
+  0%|          | 0/45 [00:00<?, ?it/s]
+  2%|�j         | 1/45 [00:00<00:09,  4.57it/s]
+100%|�i�i�i�i�i�i�i�i�i�i| 45/45 [00:00<00:00, 200.25it/s]
+2026-11-06 22:59:07.741370: E tensorflow/stream_executor/cuda/cuda_driver.cc:265] failed call to cuInit: CUDA_ERROR_NO_DEVICE: no CUDA-capable device is detected
+2026-11-06 22:59:07.757860: E tensorflow/stream_executor/cuda/cuda_driver.cc:265] failed call to cuInit: CUDA_ERROR_NO_DEVICE: no CUDA-capable device is detected
+2026-11-06 22:59:07.857618: E tensorflow/stream_executor/cuda/cuda_driver.cc:265] failed call to cuInit: CUDA_ERROR_NO_DEVICE: no CUDA-capable device is detected
+2026-11-06 22:59:14.290316: E tensorflow/stream_executor/cuda/cuda_driver.cc:265] failed call to cuInit: CUDA_ERROR_NO_DEVICE: no CUDA-capable device is detected
+2026-11-06 22:59:34.484182: E tensorflow/stream_executor/cuda/cuda_driver.cc:265] failed call to cuInit: CUDA_ERROR_NO_DEVICE: no CUDA-capable device is detected
+2026-11-06 22:59:34.521501: E tensorflow/stream_executor/cuda/cuda_driver.cc:265] failed call to cuInit: CUDA_ERROR_NO_DEVICE: no CUDA-capable device is detected
+2026-11-06 22:59:34.593287: E tensorflow/stream_executor/cuda/cuda_driver.cc:265] failed call to cuInit: CUDA_ERROR_NO_DEVICE: no CUDA-capable device is detected
+2026-11-06 22:59:58.444136: E tensorflow/stream_executor/cuda/cuda_driver.cc:265] failed call to cuInit: CUDA_ERROR_NO_DEVICE: no CUDA-capable device is detected
+2026-11-06 22:59:58.457292: E tensorflow/stream_executor/cuda/cuda_driver.cc:265] failed call to cuInit: CUDA_ERROR_NO_DEVICE: no CUDA-capable device is detected
+2026-11-06 22:59:58.531195: E tensorflow/stream_executor/cuda/cuda_driver.cc:265] failed call to cuInit: CUDA_ERROR_NO_DEVICE: no CUDA-capable device is detected
+2026-11-06 23:00:23.382768: E tensorflow/stream_executor/cuda/cuda_driver.cc:265] failed call to cuInit: CUDA_ERROR_NO_DEVICE: no CUDA-capable device is detected
+2026-11-06 23:00:23.413875: E tensorflow/stream_executor/cuda/cuda_driver.cc:265] failed call to cuInit: CUDA_ERROR_NO_DEVICE: no CUDA-capable device is detected
+2026-11-06 23:00:23.563629: E tensorflow/stream_executor/cuda/cuda_driver.cc:265] failed call to cuInit: CUDA_ERROR_NO_DEVICE: no CUDA-capable device is detected
+2026-11-06 23:00:47.792093: E tensorflow/stream_executor/cuda/cuda_driver.cc:265] failed call to cuInit: CUDA_ERROR_NO_DEVICE: no CUDA-capable device is detected
+2026-11-06 23:00:47.815012: E tensorflow/stream_executor/cuda/cuda_driver.cc:265] failed call to cuInit: CUDA_ERROR_NO_DEVICE: no CUDA-capable device is detected
+2026-11-06 23:00:47.891595: E tensorflow/stream_executor/cuda/cuda_driver.cc:265] failed call to cuInit: CUDA_ERROR_NO_DEVICE: no CUDA-capable device is detected

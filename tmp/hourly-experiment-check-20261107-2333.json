@@ -1,0 +1,23 @@
+{
+  "steel_state": "inputs_ready_awaiting_steel_shap_rule",
+  "checked_at": "2026-11-07T23:33:28.3564429+08:00",
+  "benchmark_workers_cpu_active": true,
+  "old_v4_completed_fit_count": 242,
+  "new_fits_since_previous": 57,
+  "benchmark_status": {
+    "state": "training",
+    "pid": 17012,
+    "task": "matbench_dielectric",
+    "updated_at": "2026-11-07T23:32:29.63258+08:00",
+    "wall_seconds": 464518.797,
+    "arm": "mm_kan",
+    "fold": 4,
+    "generation": 0,
+    "generation_completed": 45,
+    "generation_total": 100,
+    "completed": 45,
+    "total": 1000,
+    "last_mae": 0.254118541990239
+  },
+  "steel_first_threshold": 50
+}

@@ -2013,7 +2013,20 @@ def run_nested_protocol(
             "--final-epochs 1000. Use --allow-non-matbench-epochs only for debugging."
         )
 
-    print("Protocol: strict Matbench outer CV with independent inner CV", flush=True)
+    print("Protocol: Matbench outer CV with independent inner model selection", flush=True)
+    feature_selection_scope = (
+        "outer-training ranks reused in inner validation"
+        if args.precomputed_feature_dir
+        else "inner-training approximate local selector"
+    )
+    print(f"Feature selection: {feature_selection_scope}", flush=True)
+    if args.precomputed_feature_dir:
+        print(
+            "WARNING: Precomputed outer-fold rankings are not strictly nested "
+            "feature selection. Inner validation labels may have influenced "
+            "the rankings; the outer test remains separate.",
+            flush=True,
+        )
     print(f"Outer folds: {args.final_folds}", flush=True)
     print(f"Inner folds per outer fold: {args.inner_folds}", flush=True)
     print(f"Optimization strategy: {args.strategy}", flush=True)
@@ -2372,6 +2385,8 @@ def run_nested_protocol(
         "dataset": args.dataset,
         "task_type": task_type,
         "protocol": "matbench-nested",
+        "feature_selection_scope": feature_selection_scope,
+        "strictly_nested_feature_selection": not bool(args.precomputed_feature_dir),
         "protocol_description": (
             "Five predefined Matbench outer folds; KAN-only inner CV and model "
             "selection inside each outer train+validation partition; the fixed MLP "
@@ -2382,7 +2397,7 @@ def run_nested_protocol(
         "selection_metric": args.metric,
         "architecture_goal": (
             "Nested-select compact all-KAN networks under the selected MLP parameter "
-            "budget; outer-test performance is reported without selection leakage."
+            "budget; outer-test data are excluded from model selection."
         ),
         "shared_training_protocol": {
             "max_epochs": args.final_epochs,
@@ -2406,8 +2421,10 @@ def run_nested_protocol(
         ),
         "kan_n_feature_curve": n_feature_curve,
         "descriptor_policy": (
-            "Each n_feat is the first N columns of the official fold-specific MODNet "
-            "descriptor ranking; no KAN-specific feature reranking."
+            "Each n_feat is a prefix of the outer-fold MODNet ranking, reused "
+            "inside inner validation; not strictly nested feature selection."
+            if args.precomputed_feature_dir
+            else "Local approximate selector refitted on each inner training split."
         ),
         "mlp_hyperparameter_policy": (
             "No new MLP search; reuse each outer fold's official MODNet best_preset."
@@ -2444,7 +2461,7 @@ def run_nested_protocol(
         (output_dir / "failed-runs.json").write_text(
             json.dumps(failed_runs, indent=2), encoding="utf-8"
         )
-    print(f"\nWrote strict nested results to {output_dir}", flush=True)
+    print(f"\nWrote outer-CV results with feature-selection provenance to {output_dir}", flush=True)
 
 
 def main() -> None:

@@ -66,6 +66,7 @@ ALL_TASKS=(
   matbench_perovskites
   matbench_phonons
   matbench_steels
+  matbench_expt_is_metal
 )
 
 SMALL_TASKS=(
@@ -77,6 +78,7 @@ SMALL_TASKS=(
   matbench_perovskites
   matbench_phonons
   matbench_steels
+  matbench_expt_is_metal
 )
 
 usage() {

@@ -1,0 +1,76 @@
+{
+  "checked_at": "2026-11-12T09:36:02.669719+08:00",
+  "previous_checked_at": "2026-11-12T08:12:51.2457458+08:00",
+  "benchmark_status": {
+    "state": "feature_cross_nmi",
+    "pid": 17012,
+    "task": "matbench_dielectric",
+    "updated_at": "2026-11-12T01:35:55.173811+00:00",
+    "wall_seconds": 846324.328,
+    "bank": "mm_mv",
+    "fold": 0,
+    "completed": 2927,
+    "total": 3652
+  },
+  "new_fits_since_previous": 0,
+  "new_rows": 273,
+  "new_feature_pairs": 235326,
+  "worker_pids": [
+    5760,
+    13032,
+    15208
+  ],
+  "worker_cpu_seconds_in_two_second_sample": [
+    2.03125,
+    2.015625,
+    2.046875
+  ],
+  "benchmark_workers_cpu_active": true,
+  "active_interval_seconds": 5009.6410000000615,
+  "remaining_cross_nmi_rows": 725,
+  "estimated_remaining_cross_nmi_seconds": 5602.493010440904,
+  "estimate_basis": "Remaining triangular feature pairs at observed pair throughput, cross-NMI only",
+  "completed_folds": {
+    "mm_modnet": 5,
+    "mm_kan": 5,
+    "mm_mv_modnet": 0,
+    "mm_mv_kan": 0
+  },
+  "queues": {
+    "queue-status": {
+      "pid": 23400,
+      "updated_at": "2026-11-02T14:30:14+0800",
+      "state": "running",
+      "task": "matbench_dielectric",
+      "child_pid": 17012,
+      "command": [
+        "C:\\Users\\User\\.conda\\envs\\modnet-v012-matbench\\python.exe",
+        "-u",
+        "C:\\Users\\User\\Desktop\\kan_cgcnn\\scripts\\run_native_matbench_expansion.py",
+        "--task",
+        "matbench_dielectric",
+        "--csv",
+        "C:\\Users\\User\\Desktop\\kan_cgcnn\\benchmarks\\matbench-expansion-20261101\\source\\matbench_dielectric_featurizedMM2020Struct_mattervial.csv",
+        "--output",
+        "C:\\Users\\User\\Desktop\\kan_cgcnn\\benchmarks\\matbench-expansion-20261101\\matbench_dielectric",
+        "--n-jobs",
+        "3"
+      ]
+    },
+    "queue-additional-status": {
+      "pid": 22372,
+      "updated_at": "2026-11-12T09:35:36+0800",
+      "state": "waiting_for_steels_and_dielectric"
+    },
+    "queue-classification-status": {
+      "pid": 12444,
+      "updated_at": "2026-11-12T09:35:34+0800",
+      "state": "waiting_for_all_first_wave_regressions",
+      "smoke_tasks_passed": [
+        "matbench_expt_is_metal",
+        "matbench_glass"
+      ]
+    }
+  },
+  "new_training_failure_seen": false
+}

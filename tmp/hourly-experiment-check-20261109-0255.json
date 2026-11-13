@@ -1,0 +1,36 @@
+{
+  "steel_new_fits": 647,
+  "stage_counts": {
+    "native": 3000,
+    "mass50": 3230
+  },
+  "checked_at": "2026-11-09T02:55:48.6416836+08:00",
+  "previous_checked_at": "2026-11-09T01:56:44.713379+08:00",
+  "benchmark_status": {
+    "state": "training",
+    "pid": 17012,
+    "task": "matbench_dielectric",
+    "updated_at": "2026-11-09T02:51:18.598479+08:00",
+    "wall_seconds": 562847.75,
+    "arm": "mm_kan",
+    "fold": 4,
+    "generation": 8,
+    "generation_completed": 77,
+    "generation_total": 100,
+    "completed": 877,
+    "total": 1000,
+    "last_mae": 0.2620460016682801
+  },
+  "steel_cpu_active": true,
+  "new_fits_since_previous": 20,
+  "steel_total_formal_fits": 6230,
+  "benchmark_workers_cpu_active": true,
+  "steel_status": {
+    "state": "genetic_search",
+    "pid": 24796,
+    "updated_at": "2026-11-08T21:55:10.985318+08:00",
+    "fold": 0,
+    "stage": "mass50",
+    "progress": "C:\\Users\\User\\Desktop\\kan_cgcnn\\benchmarks\\steel396-shap-pair-20261108\\formal\\fold-0\\mass50\\progress.json"
+  }
+}

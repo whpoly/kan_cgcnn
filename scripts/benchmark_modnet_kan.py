@@ -6,6 +6,7 @@ import json
 import random
 import sys
 import time
+import warnings
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -134,7 +135,7 @@ def _json_ready(value: Any) -> Any:
     return value
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Train a MODNet-style KAN model on Matbench descriptor features."
     )
@@ -518,7 +519,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--feature-pattern-ale-bins", type=int, default=10)
     parser.add_argument("--feature-pattern-permutation-repeats", type=int, default=1)
     parser.add_argument("--feature-pattern-max-samples", type=int, default=4096)
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def normalize_loss_name(loss_name: str) -> str:
@@ -1355,12 +1356,18 @@ def primary_val_metric(task_type: str) -> str:
     return "rocauc" if task_type == "classification" else "mae"
 
 
-def metric_is_better(candidate: float, incumbent: float, task_type: str) -> bool:
+def metric_is_better(
+    candidate: float, incumbent: float, task_type: str, min_delta: float = 0.0
+) -> bool:
     if not np.isfinite(candidate):
         return False
     if not np.isfinite(incumbent):
         return True
-    return candidate > incumbent if task_type == "classification" else candidate < incumbent
+    return (
+        candidate > incumbent + min_delta
+        if task_type == "classification"
+        else candidate < incumbent - min_delta
+    )
 
 
 @torch.no_grad()
@@ -2696,6 +2703,7 @@ def run_model(
     best_epoch = 0
     patience_left = args.early_stopping_patience
     best_train_loss = float("inf")
+    best_monitor_metric = float("nan")
     epochs_ran = 0
     print(
         f"\n[{model_label}] fold {fold_data['metadata']['fold']} start: "
@@ -2757,7 +2765,14 @@ def run_model(
 
         monitor_improved = False
         if args.early_stopping_monitor == "validation" and val_loader is not None:
-            monitor_improved = improved
+            monitor_improved = metric_is_better(
+                val_metrics[val_metric_name],
+                best_monitor_metric,
+                task_type,
+                min_delta=args.early_stopping_min_delta,
+            )
+            if monitor_improved:
+                best_monitor_metric = val_metrics[val_metric_name]
         elif args.early_stopping_monitor == "validation":
             # A final fit with val_ratio=0 has no validation signal, so keep
             # the historical fixed-epoch behaviour for this monitor.
@@ -3234,6 +3249,15 @@ def prepare_precomputed_fold(
 ) -> dict[str, Any]:
     train_features = fold_data["train_features"]
     test_features = fold_data["test_features"]
+    if args.inner_fold_index is not None or args.val_ratio > 0:
+        warnings.warn(
+            "Precomputed feature ranks are reused inside validation. If ranks "
+            "were selected using all outer-training labels, inner validation "
+            "influenced feature selection; this is NOT strict nested feature "
+            "selection. Outer test isolation alone does not fix this.",
+            UserWarning,
+            stacklevel=2,
+        )
     if args.n_features < 1:
         raise ValueError("--n-features must be at least 1")
     selected_features = list(train_features.columns[: min(args.n_features, train_features.shape[1])])

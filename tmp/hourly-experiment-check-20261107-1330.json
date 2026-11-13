@@ -1,0 +1,23 @@
+{
+  "checked_at": "2026-11-07T13:30:33.3298098+08:00",
+  "previous_checked_at": "2026-11-07T12:31:02.2037479+08:00",
+  "benchmark_status": {
+    "state": "training",
+    "pid": 17012,
+    "task": "matbench_dielectric",
+    "updated_at": "2026-11-07T13:30:06.941125+08:00",
+    "wall_seconds": 428376.0930000001,
+    "arm": "mm_kan",
+    "fold": 3,
+    "generation": 4,
+    "generation_completed": 91,
+    "generation_total": 100,
+    "completed": 491,
+    "total": 1000,
+    "last_mae": 0.3188276288440177
+  },
+  "steel_state": "paused_for_method_alignment",
+  "new_fits_since_previous": 53,
+  "steel_completed_fit_count": 242,
+  "benchmark_workers_cpu_active": true
+}
